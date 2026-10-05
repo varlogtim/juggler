@@ -1,0 +1,26 @@
+// juggler waybar snippets. Merge into ~/.config/waybar/config.jsonc.
+{
+    // the displayed workstream, left-aligned right after the workspaces
+    "modules-left": [
+        "sway/workspaces",
+        "custom/juggler",
+        "sway/mode"
+    ],
+    // workspaces are named "N:label"; show only the label
+    "sway/workspaces": {
+        "format": "{name}"
+    },
+    "custom/juggler": {
+        // `jug watch` prints one JSON line per change (sway events + a 2 s tick).
+        // Classes: displayed | empty | noslot, plus "away" when the slot
+        // workspace is not the focused one. Empty text hides the module.
+        "exec": "jug watch --format waybar",
+        "return-type": "json",
+        "restart-interval": 2,
+        "format": "{}",
+        "escape": true,
+        "tooltip": true,
+        "on-click": "jug pick",
+        "on-click-right": "jug toggle"
+    }
+}
