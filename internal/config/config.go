@@ -62,6 +62,9 @@ type Config struct {
 	// CodeSubdir is where a workstream's own worktree lives inside its
 	// directory: <workstream>/<CodeSubdir>/<repo>.
 	CodeSubdir string `toml:"code_subdir"`
+	// Listen is the address `jug serve` binds (web UI + REST API). Keep it
+	// on loopback: the API runs commands as you, with no authentication.
+	Listen string `toml:"listen"`
 	// Repos maps a short name (what `--repo` accepts) to a main checkout
 	// that owns .git; new worktrees are linked to it.
 	Repos map[string]Repo `toml:"repos"`
@@ -111,6 +114,7 @@ func Default() Config {
 		IDPrefix:         userName(),
 		JiraBaseURL:      "",
 		CodeSubdir:       "src",
+		Listen:           "127.0.0.1:7474",
 	}
 }
 

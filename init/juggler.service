@@ -1,0 +1,22 @@
+[Unit]
+Description=juggler — workstreams for sway: web UI + REST API (jug serve)
+Documentation=https://github.com/varlogtim/juggler
+# Starts at login; sway may not be up yet. jug finds the live sway socket by
+# itself (SWAYSOCK, else the newest sway-ipc socket in XDG_RUNTIME_DIR) and the
+# API answers 503 for window operations until the compositor is there.
+After=graphical-session.target
+
+[Service]
+Type=simple
+# %h expands to the user's home directory.
+ExecStart=%h/.local/bin/jug serve
+# The service does not inherit your shell: give it the PATH that has jug,
+# opencode, the editor and git. Adjust to taste; unknown dirs are harmless.
+Environment=PATH=%h/.local/bin:%h/.opencode/bin:%h/bin:/usr/local/bin:/usr/bin:/bin
+# Optional overrides: JUGGLER_CONFIG, JUG_DEBUG=1 (logs every sway command).
+EnvironmentFile=-%h/.config/juggler/juggler.env
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

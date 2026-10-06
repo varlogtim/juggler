@@ -32,32 +32,32 @@ const FileName = "workstream.toml"
 // Ref links a workstream to something external: the ticket (leadership's
 // interface), the PR (the code's interface), or any URL.
 type Ref struct {
-	Type    string    `toml:"type"`          // jira | pr | issue | url
-	Key     string    `toml:"key,omitempty"` // AISW-53270, hpe/ezaddon-mlis#870
-	URL     string    `toml:"url"`
-	Title   string    `toml:"title,omitempty"`
-	Status  string    `toml:"status,omitempty"`  // cached external state (importer-owned)
-	Updated time.Time `toml:"updated,omitempty"` // when Status was last observed
+	Type    string    `toml:"type" json:"type"`                   // jira | pr | issue | url
+	Key     string    `toml:"key,omitempty" json:"key,omitempty"` // AISW-53270, hpe/ezaddon-mlis#870
+	URL     string    `toml:"url" json:"url"`
+	Title   string    `toml:"title,omitempty" json:"title,omitempty"`
+	Status  string    `toml:"status,omitempty" json:"status,omitempty"`   // cached external state (importer-owned)
+	Updated time.Time `toml:"updated,omitempty" json:"updated,omitempty"` // when Status was last observed
 }
 
 // Workstream is the metadata file.
 type Workstream struct {
-	ID       string    `toml:"id"`
-	Category string    `toml:"category"`
-	Desc     string    `toml:"desc"`
-	Created  time.Time `toml:"created"`
+	ID       string    `toml:"id" json:"id"`
+	Category string    `toml:"category" json:"category"`
+	Desc     string    `toml:"desc" json:"desc"`
+	Created  time.Time `toml:"created" json:"created"`
 	// CodeDir is the checkout the workstream works in (cwd for opencode and
 	// terminals). Relative = inside the workstream directory (its own git
 	// worktree, see `jug add --repo`); empty = the workstream directory.
-	CodeDir string `toml:"code_dir,omitempty"`
+	CodeDir string `toml:"code_dir,omitempty" json:"code_dir,omitempty"`
 	// OpencodeSession pins the opencode session this workstream resumes
 	// (`opencode -s <id>`). Empty means none yet: juggler creates one on the
 	// next show (if opencode_sessions is on in the config).
-	OpencodeSession string `toml:"opencode_session,omitempty"`
-	Refs            []Ref  `toml:"refs,omitempty"`
+	OpencodeSession string `toml:"opencode_session,omitempty" json:"opencode_session,omitempty"`
+	Refs            []Ref  `toml:"refs,omitempty" json:"refs,omitempty"`
 
-	// Dir is the workstream directory (not serialized).
-	Dir string `toml:"-"`
+	// Dir is the workstream directory (not serialized to TOML).
+	Dir string `toml:"-" json:"dir"`
 }
 
 // Name is the canonical name: the directory base name.

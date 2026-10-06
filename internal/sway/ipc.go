@@ -18,6 +18,8 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -39,16 +41,38 @@ type Conn struct {
 	r *bufio.Reader
 }
 
-// SocketPath returns $SWAYSOCK, falling back to `sway --get-socketpath`.
+// SocketPath returns $SWAYSOCK, else `sway --get-socketpath`, else the
+// newest live sway-ipc socket under $XDG_RUNTIME_DIR (a service started
+// before the compositor exported SWAYSOCK still finds it this way).
 func SocketPath() (string, error) {
 	if p := os.Getenv("SWAYSOCK"); p != "" {
 		return p, nil
 	}
-	out, err := exec.Command("sway", "--get-socketpath").Output()
-	if err != nil {
-		return "", errors.New("SWAYSOCK is not set and `sway --get-socketpath` failed; are you inside a sway session?")
+	if out, err := exec.Command("sway", "--get-socketpath").Output(); err == nil {
+		if p := strings.TrimSpace(string(out)); p != "" {
+			return p, nil
+		}
 	}
-	return strings.TrimSpace(string(out)), nil
+	dir := os.Getenv("XDG_RUNTIME_DIR")
+	if dir == "" {
+		dir = fmt.Sprintf("/run/user/%d", os.Getuid())
+	}
+	matches, _ := filepath.Glob(filepath.Join(dir, "sway-ipc.*.sock"))
+	sort.Slice(matches, func(i, j int) bool {
+		fi, _ := os.Stat(matches[i])
+		fj, _ := os.Stat(matches[j])
+		if fi == nil || fj == nil {
+			return fi != nil
+		}
+		return fi.ModTime().After(fj.ModTime())
+	})
+	for _, m := range matches {
+		if c, err := net.DialTimeout("unix", m, 500*time.Millisecond); err == nil {
+			c.Close()
+			return m, nil
+		}
+	}
+	return "", errors.New("SWAYSOCK is not set and no live sway-ipc socket was found; are you inside a sway session?")
 }
 
 // Dial connects to the running sway.

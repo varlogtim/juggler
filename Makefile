@@ -5,6 +5,9 @@
 #   make test vet fmt
 #   make poc         re-run the sway layout proof-of-concept (opens/closes windows!)
 #   make poc-lot     same for the lot (parked workstreams) mechanics
+#   make ui-shot     render the web UI headlessly (needs node + google-chrome, a running `jug serve`)
+#   make service-install / service-enable / service-status / reinstall
+#                    run `jug serve` (web UI + REST API) as a systemd --user service
 #   make workspaces  one-time: rename the live sway workspaces to the N:name scheme
 #                    (the config edit is manual, see README "Install")
 
@@ -14,7 +17,10 @@ SWAY_DIR := $(HOME)/.config/sway
 VERSION  := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS  := -X main.version=$(VERSION)
 
-.PHONY: build install test vet fmt check poc poc-lot workspaces clean
+UNIT_DIR := $(HOME)/.config/systemd/user
+
+.PHONY: build install test vet fmt check poc poc-lot ui-shot workspaces clean \
+        service-install service-enable service-status reinstall
 
 build:
 	@mkdir -p build
@@ -50,6 +56,31 @@ poc-lot:
 # editing the config to the N:name scheme and BEFORE `swaymsg reload`.
 workspaces:
 	scripts/rename-workspaces.sh
+
+ui-shot:
+	node scripts/ui-shot.mjs 'http://127.0.0.1:7474/?nolive' build/ui-list.png
+	node scripts/ui-shot.mjs 'http://127.0.0.1:7474/?nolive' build/ui-detail.png 'document.querySelectorAll("#detail-pane fieldset").length' '#list tbody tr:first-child'
+	@echo "screenshots: build/ui-list.png build/ui-detail.png"
+
+# jug serve as a systemd --user service: web UI + REST API on 127.0.0.1:7474
+# (config: listen). Supervision (restart on crash, relaunch on update) is
+# systemd's job; `make reinstall` rebuilds and restarts it.
+service-install: install
+	install -d $(UNIT_DIR)
+	install -m 0644 init/juggler.service $(UNIT_DIR)/juggler.service
+	systemctl --user daemon-reload
+	@echo "installed $(UNIT_DIR)/juggler.service; next: make service-enable"
+
+service-enable:
+	systemctl --user enable --now juggler
+	@sleep 0.5; systemctl --user --no-pager status juggler | head -5
+
+service-status:
+	systemctl --user --no-pager status juggler | head -12
+
+reinstall: install
+	systemctl --user restart juggler
+	@sleep 0.5; systemctl --user --no-pager status juggler | head -5
 
 clean:
 	rm -rf build
