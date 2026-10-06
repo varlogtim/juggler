@@ -24,19 +24,24 @@ the editor buffer). Your scratchpad is never touched. Your normal sway keys
 keep working inside: open a terminal, move focus up and down the stack, close
 things.
 
-Everything is a small Go binary, `jug`, driven from sway bindings. No daemon,
-no plugin, no patched compositor: it only speaks sway's IPC protocol.
+Everything is a small Go binary, `jug`, driven from sway bindings. No plugin,
+no patched compositor: it only speaks sway's IPC protocol. The optional
+`jug serve` (a systemd user service) puts the same operations behind a
+REST API and a web UI.
 
-**Status: stage one.** Slot, lot, picker, single-key menu, per-workstream
-opencode sessions, git worktrees with seeded files, waybar module, dictation
-hook. Refs (ticket/PR) are entered by hand; syncing them from Jira/GitHub and
-the opencode-side integration are the next stages — see
-[Limitations and roadmap](#limitations-and-roadmap).
+**Status: stage two.** Stage one: slot, lot, picker, single-key menu,
+per-workstream opencode sessions, git worktrees with seeded files, waybar
+module, dictation hook. Stage two: the same operations as a **REST API** and
+a **web UI** (`jug serve`, a systemd user service), with the CLI, the API and
+the UI sharing one service layer. Refs (ticket/PR) are still entered by hand;
+syncing them from Jira/GitHub and the opencode-side integration are next —
+see [Limitations and roadmap](#limitations-and-roadmap).
 
 - [Concepts](#concepts)
 - [Install](#install)
 - [Use cases](#use-cases)
 - [Commands](#commands)
+- [Web UI and REST API](#web-ui-and-rest-api)
 - [Configuration](#configuration)
 - [How it works](#how-it-works)
 - [Test plan](#test-plan)
@@ -134,7 +139,9 @@ Optional: [opencode](https://opencode.ai), nvim, waybar, direnv,
 
 ```sh
 make install          # ~/.local/bin/jug + ~/.config/sway/juggler.conf
-jug doctor            # checks sway IPC, tools, workspace naming
+jug doctor            # checks sway IPC, tools, workspace naming, config
+make service-install  # optional: `jug serve` (web UI + REST API) as a systemd --user service
+make service-enable   #           start now and at login → http://127.0.0.1:7474/
 ```
 
 Then three edits to your sway config (`sway/juggler.conf` is the bindings
@@ -234,6 +241,14 @@ jug open pr
 If that workstream is not the displayed one at that moment, the open is
 **queued** (you get a notification) and runs the next time you show it — it
 never hijacks the workstream you are looking at.
+
+Anything that can speak HTTP can do the same without the `jug` binary on
+its PATH (see [Web UI and REST API](#web-ui-and-rest-api)):
+
+```sh
+curl -s -X POST -H 'Content-Type: application/json' \
+  http://127.0.0.1:7474/api/v1/workstreams/AISW-53270/open -d '{"what":"pr"}'
+```
 
 ### UC7 — Review what the AI wrote
 
@@ -366,6 +381,18 @@ the workstream directory — notes included, so archive first if you want them.
 `●` displayed, `◐` parked (alive), `○` not open. Displayed first, then parked
 by last shown, then the rest by creation.
 
+### UC13 — Manage everything from a browser
+
+`make service-install && make service-enable`, then open
+<http://127.0.0.1:7474/>. The page is the picker, the menu and `jug ls` in
+one place, kept live by the server: the header shows the slot and what is
+displayed, every row has *show*, and the detail pane does what the CLI does —
+edit (category, id, description, ticket), refs, the TODO.md editor, worktree
+and seeds, the opencode session, the window actions, and remove with the same
+dry run. Useful when a workstream is parked and you want to fix its refs or
+notes without bringing it to the slot, and as the thing to point a second
+screen or a phone at (over an SSH tunnel — it binds to loopback only).
+
 ## Commands
 
 ```
@@ -393,15 +420,117 @@ jug repo seed [--ws WS] [--force]                                   (re)copy the
 jug set WS [--category C] [--id ID] [--desc D] [--jira KEY]   rename / recategorize (directory follows)
 jug rm WS [--yes] [--force]      remove: windows, worktree (branch kept), directory
 jug ref add TYPE VALUE [--title T] [--status S] [--ws WS]
+jug ref rm TYPE [KEY|URL] [--ws WS]
 jug ref ls [--ws WS]
 jug close WS
 jug watch [--format plain|json|waybar]
+jug serve [--listen ADDR]        web UI + REST API (default 127.0.0.1:7474; see below)
 jug doctor
 ```
 
 `WS` resolves by canonical name (`work_AISW-53270_…`), id (`AISW-53270`), or
 a unique prefix of either. `--ws` defaults to `$JUG_WORKSTREAM`, then the
 displayed workstream. Set `JUG_DEBUG=1` to see every sway command issued.
+
+## Web UI and REST API
+
+`jug serve` runs a small HTTP server (default `127.0.0.1:7474`, config
+`listen`) with two things on it: a JSON API that exposes every operation the
+CLI has, and a single-page web UI built on that API. Run it by hand or as the
+systemd user service `make service-install` installs (`init/juggler.service`:
+restarts on failure, finds the live sway socket itself when started before
+the compositor, answers `503 sway_unavailable` for window operations until
+sway is there).
+
+**The UI** (`http://127.0.0.1:7474/`): the header shows the slot, what is
+displayed, how many are parked, and has *slot here / park / lot / + new*;
+the table lists every workstream (state glyph, id, category, description,
+refs with their cached status, open TODO count, branch with a *dirty* badge,
+session) with a filter box (`/` focuses it) and a *show*/*focus* button per
+row. Clicking a row opens the detail pane: actions (show, focus, park, term,
+notes, review, open jira/pr, dictate, close windows), an **edit** form
+(category, id, description, ticket — the directory follows), **code**
+(branch, head, upstream, worktree-of; *add worktree* / *re-seed*), **refs**
+(add/remove/open), a **TODO.md** editor, the **opencode session** (what is
+pinned, choose an existing session, new, relaunch, unpin) and **remove** with
+the same dry-run the CLI prints. It updates live: the page subscribes to
+`/api/v1/events`, which relays sway workspace/window events (debounced) and
+the server's own mutations.
+
+**Security:** there is no authentication — the API runs commands as you. It
+binds to loopback only and refuses anything else unless `JUG_SERVE_ANY=1`.
+Do not put it behind a reverse proxy.
+
+**The API** (`/api/v1`, JSON; errors are `{"error": …, "code": …}` with
+`400 bad_request`, `404 not_found`, `409 dirty|nothing_parked`,
+`503 sway_unavailable`). `{ws}` is a canonical name, an id or a unique prefix.
+
+| method, path | does | body / notes |
+|---|---|---|
+| `GET /health` | liveness | `{ok, version, time}` |
+| `GET /status` | slot, displayed, lot, focused workspace | same picture the bar uses |
+| `GET /doctor` | the `jug doctor` checks | `[{ok, what, detail}]` |
+| `GET /config` | effective config, categories, repos | |
+| `GET /repos` | configured repos | `[{name, path, remote, default_branch, seed_dir, ok}]` |
+| `GET /events` | Server-Sent Events | `hello`, `changed`, `tick` |
+| `POST /slot/toggle` | `jug toggle` | `{on, slot}` |
+| `POST /slot/park` · `/slot/park-others` | `jug park` · `jug park --others` | |
+| `POST /lot` | `jug lot` | 409 when nothing is parked |
+| `GET /workstreams` | `jug ls --json` | `[WorkstreamInfo]` |
+| `POST /workstreams` | `jug add` | `{desc, jira, category, id, pr, code_dir \| repo, branch, base, no_fetch, show}` → 201 `{workstream, worktree, warnings}` |
+| `GET /workstreams/{ws}` | one `WorkstreamInfo` | |
+| `PATCH /workstreams/{ws}` | `jug set` | `{category, id, desc, jira}` (any subset) → `{result, workstream}` |
+| `DELETE /workstreams/{ws}?force=true` | `jug rm --yes [--force]` | 409 `dirty` without force |
+| `GET /workstreams/{ws}/plan` | the `jug rm` dry run | `{has_worktree, worktree, branch, dirty}` |
+| `GET /workstreams/{ws}/env` | `jug env` | `{JUG_WORKSTREAM, …}` |
+| `GET` · `PUT /workstreams/{ws}/todo` | TODO.md | `{text}` → `{open}` |
+| `GET` · `POST /workstreams/{ws}/refs` | `jug ref ls` · `jug ref add` | `{type, value, title, status}` |
+| `DELETE /workstreams/{ws}/refs/{type}?key=…` | `jug ref rm` | `url=` works too |
+| `POST /workstreams/{ws}/repo` | `jug repo add` | `{repo, branch, base, no_fetch}` → 201 `{worktree, workstream}` |
+| `POST /workstreams/{ws}/seed` | `jug repo seed` | `{force}` → `{seeded}` |
+| `POST /workstreams/{ws}/show` | `jug show` | `{no_switch}` |
+| `POST /workstreams/{ws}/close` | `jug close` | |
+| `POST /workstreams/{ws}/open` | `jug open` | `{what: "jira"\|"pr"\|"issue"\|URL}` → `{queued}` |
+| `POST /workstreams/{ws}/term` | `jug term` | `{title, command}` |
+| `POST /workstreams/{ws}/notes` · `/review` · `/focus` · `/dictate` | the matching verb | |
+| `GET /workstreams/{ws}/session` | `jug session` | `{pinned, session}` (starts a transient opencode server) |
+| `GET /workstreams/{ws}/session/candidates?all=true` | `jug session pick` list | `{pinned, sessions}` |
+| `PUT /workstreams/{ws}/session` | `jug session pin\|new` | `{id}` or `{new: true}`, `{relaunch}` |
+| `DELETE /workstreams/{ws}/session` | `jug session unpin` | |
+| `POST /workstreams/{ws}/session/relaunch` | `jug session --relaunch` | |
+
+`WorkstreamInfo` (also what `jug ls --json` prints):
+
+```json
+{ "name": "work_AISW-53270_disagg-toggle-requires-pause", "id": "AISW-53270", "category": "work",
+  "desc": "disagg toggle requires pause", "created": "…", "dir": "/home/me/workstreams/work_AISW-53270_…",
+  "code_dir": "src/ezaddon-mlis", "code_path": "/home/me/workstreams/…/src/ezaddon-mlis", "code_inside": true, "has_code": true,
+  "refs": [{ "type": "jira", "key": "AISW-53270", "url": "https://…/browse/AISW-53270", "status": "Blocked" }],
+  "opencode_session": "ses_…", "state": "parked", "todos_open": 5, "shown": "2026-10-05T12:00:00-04:00",
+  "git": { "branch": "tim/aisw-53270-…", "head": "48faeb67", "dirty": false, "linked": true, "main": "/home/me/src/ezaddon-mlis", "upstream": "origin/…", "ahead": 0, "behind": 0 } }
+```
+
+Copy/pasta:
+
+```sh
+J=http://127.0.0.1:7474/api/v1
+curl -s $J/workstreams | jq -r '.[] | [.state, .id, .desc] | @tsv'
+curl -s -X POST -H 'Content-Type: application/json' $J/workstreams \
+  -d '{"desc":"fix the thing","jira":"AISW-123","repo":"ezaddon-mlis","show":true}' | jq .
+curl -s -X POST -H 'Content-Type: application/json' $J/workstreams/AISW-123/open -d '{"what":"jira"}' | jq .
+curl -s -X PATCH -H 'Content-Type: application/json' $J/workstreams/AISW-123 -d '{"desc":"renamed"}' | jq .result
+curl -s $J/workstreams/AISW-123/plan | jq . && curl -s -X DELETE "$J/workstreams/AISW-123" | jq .
+```
+
+Not on the API by design: `pick` and `menu` (they *are* a UI — the web page
+replaces them) and `watch` (use `/events`).
+
+For scripted captures, `/?nolive` loads the page without the event stream
+(headless browsers otherwise wait on the open connection);
+`scripts/ui-shot.mjs URL OUT.png [EXPR] [CLICK]` (Node ≥ 22, google-chrome)
+renders a page over the DevTools protocol, fails on console errors and
+returns the value of `EXPR` — `make ui-shot` uses it for the list and detail
+views.
 
 ## Configuration
 
@@ -424,6 +553,7 @@ default_category = "personal"
 id_prefix        = "tim"                       # ids for workstreams without a ticket: tim-0001 (default: $USER)
 jira_base_url    = "https://yourcompany.atlassian.net"   # required for --jira / jira refs (no default)
 code_subdir      = "src"                       # <workstream>/src/<repo> for worktrees
+listen           = "127.0.0.1:7474"            # `jug serve` address (loopback only)
 
 # Top-level keys must come before any [table] (TOML).
 [repos.ezaddon-mlis]                           # what `--repo ezaddon-mlis` means
@@ -474,13 +604,25 @@ whole batch with "No matching node." for an unmatched criteria. The opencode
 session pin is part of the workstream itself (`workstream.toml`), because it
 must survive everything else.
 
-Code map: `cmd/jug` (CLI) · `internal/sway` (IPC client, tree helpers) ·
-`internal/layout` (build/show/park/spawn/open) · `internal/store`
+**One service layer, three faces.** Every operation lives once, in
+`internal/app`, as a function that takes inputs and returns values. The CLI
+(`cmd/jug`) parses flags and prints; the HTTP layer (`internal/web`) decodes
+JSON and encodes results; the web UI calls the HTTP layer. Operations that
+touch sway take a `*layout.Engine` — one IPC connection plus the runtime
+state — which the CLI opens once per invocation and the server opens once
+per request, serialized by a mutex so two requests never do tree surgery at
+the same time. Store-only operations (create, refs, TODO, rename, remove)
+work without a compositor, which is what the HTTP tests run against.
+
+Code map: `cmd/jug` (CLI) · `internal/app` (service layer) · `internal/web`
+(REST API, SSE, embedded UI in `ui/`) · `internal/sway` (IPC client, tree
+helpers) · `internal/layout` (build/show/park/spawn/open) · `internal/store`
 (workstream.toml, state.json) · `internal/picker` (fuzzel rows) ·
 `internal/bar` (waybar stream) · `internal/oc` (opencode session API) ·
 `internal/gitwt` (git worktrees) · `internal/seed` (per-checkout files) ·
 `internal/config`. Scripts: `scripts/relocate-venv.sh`,
-`scripts/rename-workspaces.sh`, the PoCs.
+`scripts/rename-workspaces.sh`, `scripts/ui-shot.mjs` (headless render of
+the UI over the DevTools protocol, for smoke tests), the PoCs.
 
 ## Test plan
 
@@ -528,10 +670,19 @@ that are not hotkeys.
 | 35 | UC10 | `$mod+t` → `+ new workstream…`, type `AISW-1 picker test`, Enter, choose the repo row | `work_AISW-1_picker-test/` with a `jira` ref and `src/<repo>` worktree on branch `AISW-1`; it is shown. Repeat with `personal: just notes` → `no code` → a `personal_tim-NNNN_just-notes/`, code dir = the workstream dir. `Esc` at the second prompt creates nothing |
 | 36 | UC10c | `jug set <ws> --jira AISW-2 --desc "renamed"` on a displayed workstream with a worktree | directory renamed to `work_AISW-2_renamed`, `git worktree list` shows the new path (nothing prunable), `direnv status` allowed, `jug session` shows the new title, windows reopened on the same session, your focused workspace unchanged |
 | 37 | UC10b | `scripts/relocate-venv.sh <checkout>/.venv ~/venvs/x` | prints the move; `~/venvs/x/bin/python -c 'import sys;print(sys.prefix)'` is the new path; `~/venvs/x/bin/pip --version` runs; `source ~/venvs/x/bin/activate` sets `VIRTUAL_ENV` to the new path and the prompt to `(x)` |
+| 38 | web | `make service-install && make service-enable`, open http://127.0.0.1:7474/ | header shows the slot and the displayed workstream; the table matches `jug ls`; the live dot is green |
+| 39 | web | *+ new* → description `web test`, ticket `AISW-1`, worktree of a repo, *show it now* → create | row appears as displayed, the slot shows it, detail pane opens; `jug ls` agrees |
+| 40 | web | in the detail pane: change the description, save; add a `url` ref; edit TODO.md and save; *choose existing…* and pick a session | directory renamed (`jug ls`), ref listed with its link, TODO count updated, session pinned (`jug session --ws AISW-1`) |
+| 41 | web | *term*, *notes*, *open jira*, *park*, *show* from the pane | each does what the key does; after *park* the row is `◐` and the header says nothing displayed |
+| 42 | web | *remove workstream…* → read the plan → confirm | row gone, directory gone, worktree removed (`git worktree list`), branch kept |
+| 43 | api | `curl -s -X POST …/workstreams/nope/show` and `curl -s …/workstreams/x` with the service stopped | `404 not_found` / connection refused; with sway gone (e.g. from a tty) every window endpoint answers `503 sway_unavailable` and CRUD still works |
+| 44 | api | `JUG_SERVE_ANY= jug serve --listen 0.0.0.0:7474` | refuses to start |
 
 Automated: `make test` (store naming/resolution, picker rows and the
-new-workstream spec, sway-safe shell quoting). The sway mechanics are covered
-by `make poc` and `make poc-lot`.
+new-workstream spec, sway-safe shell quoting, the service layer's store-only
+paths, and the HTTP API end to end against a temp store without sway). The
+sway mechanics are covered by `make poc` and `make poc-lot`; `make ui-shot`
+renders the UI headlessly (list + detail) and fails on console errors.
 
 ## Limitations and roadmap
 
@@ -549,6 +700,8 @@ by `make poc` and `make poc-lot`.
   Commit (even WIP) in each worktree before `make release-local`, or override
   with `make -e VERSION=…`. Each cluster also holds one deployed MLIS, so
   simultaneous deploys need distinct clusters (kontext).
+- **The web UI has no authentication.** It is a local control panel bound
+  to loopback; anything that can reach the port can run `jug` as you.
 - **Session operations start a short-lived `opencode serve`** (~1 s) — on
   the first show of a workstream and for `jug session …`. Set
   `opencode_sessions = false` to launch the configured command as-is.
@@ -562,11 +715,11 @@ by `make poc` and `make poc-lot`.
 - **A sway restart loses the windows** (not the files): juggler rebuilds a
   workstream the next time you show it and `opencode -s <pinned id>` resumes
   the conversation.
-- **Refs are static** until the importer lands (`jug sync`, stage two): a timer
+- **Refs are static** until the importer lands (`jug sync`, stage three): a timer
   that queries Jira for tickets assigned to you and GitHub for the branch's
   PR, writes the cached `status`/`title`/`updated`, and can create workstreams
   for new tickets. The data model already has the fields.
-- **opencode integration** (stage two): a skill so the assistant keeps `TODO.md`
+- **opencode integration** (stage three): a skill so the assistant keeps `TODO.md`
   current, records follow-up tickets there, and calls `jug ref add` /
   `jug open pr` when it opens a PR.
 - Then: nvim picker (`:Jug`), notifications when CI goes red or a review
