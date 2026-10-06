@@ -160,6 +160,7 @@ type CreateOptions struct {
 	CodeDir  string // an existing directory ("" = the workstream dir)
 	Jira     string // ticket key: becomes a jira ref (and the id)
 	PR       string // pull request URL: becomes a pr ref
+	Groups   []string
 }
 
 // CategoryFor applies the one rule: a workstream with a ticket is "work"
@@ -245,6 +246,13 @@ func (a *App) Create(o CreateOptions) (*store.Workstream, error) {
 		codeDir = layout.ShortDir(abs)
 	}
 	w := &store.Workstream{ID: id, Category: category, Desc: desc, Created: time.Now(), CodeDir: codeDir}
+	for _, g := range store.NormalizeGroups(o.Groups) {
+		g, err := store.NormalizeGroupName(g)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrInvalid, err)
+		}
+		w.Groups = append(w.Groups, g)
+	}
 	if o.Jira != "" {
 		u, err := a.JiraURL(o.Jira)
 		if err != nil {

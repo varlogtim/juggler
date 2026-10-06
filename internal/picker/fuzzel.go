@@ -49,7 +49,7 @@ func Lines(entries []Entry) []string {
 	for _, e := range ordered {
 		rows = append(rows, row(e))
 	}
-	widths := make([]int, 6)
+	widths := make([]int, 7)
 	for _, r := range rows {
 		for i, c := range r {
 			if n := utf8.RuneCountInString(c); n > widths[i] {
@@ -97,7 +97,7 @@ func row(e Entry) []string {
 	if w.CodeDir == "" {
 		todo = strings.TrimSpace(todo + " no-code")
 	}
-	return []string{glyph + " " + w.ID, w.Desc, jira, pr, todo, w.Category}
+	return []string{glyph + " " + w.ID, w.Desc, jira, pr, todo, w.Category, strings.Join(w.Groups, ",")}
 }
 
 func prLabel(r *store.Ref) string {

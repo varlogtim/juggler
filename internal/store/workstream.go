@@ -55,6 +55,10 @@ type Workstream struct {
 	// next show (if opencode_sessions is on in the config).
 	OpencodeSession string `toml:"opencode_session,omitempty" json:"opencode_session,omitempty"`
 	Refs            []Ref  `toml:"refs,omitempty" json:"refs,omitempty"`
+	// Groups tags the workstream into buckets (a sprint, a project, …).
+	// Membership lives here; what a group is (dates, kind) lives in the
+	// registry, see groups.go.
+	Groups []string `toml:"groups,omitempty" json:"groups"`
 
 	// Dir is the workstream directory (not serialized to TOML).
 	Dir string `toml:"-" json:"dir"`
@@ -191,6 +195,7 @@ func (s Store) Save(w *Workstream) error {
 	if err := os.MkdirAll(w.NotesDir(), 0o755); err != nil {
 		return err
 	}
+	w.Groups = NormalizeGroups(w.Groups)
 	var buf bytes.Buffer
 	buf.WriteString("# juggler workstream — see `jug help`\n")
 	if err := toml.NewEncoder(&buf).Encode(w); err != nil {

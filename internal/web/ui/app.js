@@ -4,10 +4,13 @@
 'use strict';
 
 const S = {
-  status: null, items: [], config: null, repos: [],
+  status: null, items: [], groups: [], config: null, repos: [],
   selected: null, detail: null, todo: null, session: null, cands: null, candsAll: false,
   filter: '', onlyLive: false, live: false,
+  view: localStorage.getItem('jug.view') || 'grouped',
+  collapsed: JSON.parse(localStorage.getItem('jug.collapsed') || '{}'),
 };
+const NOGROUP = '\u0000nogroup';
 
 // ------------------------------------------------------------------ api
 
@@ -52,6 +55,24 @@ function short(p) { return S.config && S.config.home && p && p.startsWith(S.conf
 function busy(btn, fn) {
   return async (...a) => { if (btn) btn.disabled = true; try { return await fn(...a); } catch (e) { toast(e.message, 'err'); } finally { if (btn) btn.disabled = false; } };
 }
+function fmtDate(d) {
+  if (!d) return '';
+  const [y, m, day] = d.split('-').map(Number);
+  return new Date(y, m - 1, day).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+function dateRange(g) {
+  if (g.start && g.end) return `${fmtDate(g.start)} → ${fmtDate(g.end)}`;
+  if (g.end) return `until ${fmtDate(g.end)}`;
+  if (g.start) return `from ${fmtDate(g.start)}`;
+  return '';
+}
+function daysLeftText(g) {
+  if (g.days_left === undefined || g.days_left === null) return '';
+  if (g.days_left < 0) return `ended ${-g.days_left}d ago`;
+  if (g.days_left === 0) return 'ends today';
+  if (g.days_left === 1) return 'ends tomorrow';
+  return `${g.days_left}d left`;
+}
 function stateGlyph(st) { return st === 'displayed' ? '●' : st === 'parked' ? '◐' : '○'; }
 function refBadge(r) {
   const label = r.key || (r.type === 'url' ? new URL(r.url).host : r.type);
@@ -65,8 +86,8 @@ function scheduleRefresh(ms = 120) { clearTimeout(refreshTimer); refreshTimer = 
 
 async function refreshAll() {
   try {
-    const [status, items] = await Promise.all([GET('/api/v1/status'), GET('/api/v1/workstreams')]);
-    S.status = status; S.items = items;
+    const [status, items, groups] = await Promise.all([GET('/api/v1/status'), GET('/api/v1/workstreams'), GET('/api/v1/groups?all=true')]);
+    S.status = status; S.items = items; S.groups = groups;
     if (S.selected && !items.find(i => i.name === S.selected)) { S.selected = null; S.detail = null; }
     render();
     if (S.selected) await loadDetail(S.selected, { keepTodo: true });
@@ -101,35 +122,74 @@ async function loadSession(name, force = false) {
 
 // ------------------------------------------------------------------ render: header + list
 
+function rowHTML(it) {
+  const g = it.git;
+  const branch = g ? (g.branch || ('@' + g.head)) + (g.dirty ? '*' : '') : '';
+  const sess = it.opencode_session ? it.opencode_session.slice(-8) : '';
+  const groups = S.view === 'flat' ? (it.groups || []).map(x => h`<span class="badge group">${x}</span>`).join('') : '';
+  return h`<tr data-name="${it.name}" class="${it.state} ${S.selected === it.name ? 'selected' : ''}">
+    <td class="state" title="${it.state}">${stateGlyph(it.state)}</td>
+    <td class="id">${it.id}</td>
+    <td><span class="badge cat-${it.category}">${it.category}</span>${raw(groups)}</td>
+    <td class="desc">${it.desc}${it.has_code ? '' : raw(' <span class="badge nocode" title="no code dir: terminals start in the workstream dir">no code</span>')}</td>
+    <td>${raw((it.refs || []).map(refBadge).join(''))}</td>
+    <td class="mono">${it.todos_open || ''}</td>
+    <td class="mono" title="${g ? short(it.code_path) : ''}">${branch}${g && g.dirty ? raw(' <span class="badge dirty" title="uncommitted changes">dirty</span>') : ''}</td>
+    <td class="mono dim" title="${it.opencode_session || ''}">${sess}</td>
+    <td class="actions sm">${it.state === 'displayed' ? raw('<button data-act="focus" title="focus opencode">focus</button>') : raw('<button data-act="show" class="primary" title="show in the slot">show</button>')}</td>
+  </tr>`;
+}
+
+function groupRowHTML(g, n, collapsed) {
+  const key = g ? g.name : NOGROUP;
+  const meta = g ? [dateRange(g), daysLeftText(g)].filter(Boolean).join(' · ') : 'workstreams in no group';
+  const cls = ['group-row', collapsed ? 'collapsed' : '', g && g.current ? 'current' : '', g && g.days_left !== undefined && g.days_left !== null && g.days_left < 0 ? 'past' : ''].join(' ');
+  return h`<tr class="${cls}" data-group="${key}"><td colspan="9"><div>
+    <span class="chev">▾</span><span class="gname">${g ? g.name : 'no group'}</span>
+    ${g && g.kind ? raw(h`<span class="badge kind">${g.kind}</span>`) : ''}
+    ${g && g.current ? raw('<span class="badge current">current</span>') : ''}
+    ${g && !g.current && g.days_left !== undefined && g.days_left !== null && g.days_left < 0 ? raw('<span class="badge ended">ended</span>') : ''}
+    <span class="gmeta">${meta}</span>${g && g.desc ? raw(h`<span class="gmeta">— ${g.desc}</span>`) : ''}
+    <span class="gcount">${n}</span>
+    ${g ? raw('<button class="sm" data-gact="edit" title="edit this group">edit</button>') : ''}
+  </div></td></tr>`;
+}
+
 function render() {
   renderStatus();
   const q = S.filter.trim().toLowerCase();
-  const rows = S.items.filter(it => {
+  const match = (it) => {
     if (S.onlyLive && it.state === 'none') return false;
     if (!q) return true;
-    const hay = [it.id, it.desc, it.category, it.name, it.git && it.git.branch, ...(it.refs || []).map(r => r.key + ' ' + r.status + ' ' + r.title)].join(' ').toLowerCase();
+    const hay = [it.id, it.desc, it.category, it.name, it.git && it.git.branch, ...(it.groups || []), ...(it.refs || []).map(r => r.key + ' ' + r.status + ' ' + r.title)].join(' ').toLowerCase();
     return q.split(/\s+/).every(t => hay.includes(t));
-  });
+  };
   const order = { displayed: 0, parked: 1, none: 2 };
-  rows.sort((a, b) => (order[a.state] - order[b.state]) || (b.shown || '').localeCompare(a.shown || '') || (b.created || '').localeCompare(a.created || ''));
+  const sortRows = (rows) => rows.sort((a, b) => (order[a.state] - order[b.state]) || (b.shown || '').localeCompare(a.shown || '') || (b.created || '').localeCompare(a.created || ''));
+  const rows = sortRows(S.items.filter(match));
   const tb = $('#list tbody');
-  tb.innerHTML = rows.map(it => {
-    const g = it.git;
-    const branch = g ? (g.branch || ('@' + g.head)) + (g.dirty ? '*' : '') : '';
-    const sess = it.opencode_session ? it.opencode_session.slice(-8) : '';
-    return h`<tr data-name="${it.name}" class="${it.state} ${S.selected === it.name ? 'selected' : ''}">
-      <td class="state" title="${it.state}">${stateGlyph(it.state)}</td>
-      <td class="id">${it.id}</td>
-      <td><span class="badge cat-${it.category}">${it.category}</span></td>
-      <td class="desc">${it.desc}${it.has_code ? '' : raw(' <span class="badge nocode" title="no code dir: terminals start in the workstream dir">no code</span>')}</td>
-      <td>${raw((it.refs || []).map(refBadge).join(''))}</td>
-      <td class="mono">${it.todos_open || ''}</td>
-      <td class="mono" title="${g ? short(it.code_path) : ''}">${branch}${g && g.dirty ? raw(' <span class="badge dirty" title="uncommitted changes">dirty</span>') : ''}</td>
-      <td class="mono dim" title="${it.opencode_session || ''}">${sess}</td>
-      <td class="actions sm">${it.state === 'displayed' ? raw('<button data-act="focus" title="focus opencode">focus</button>') : raw('<button data-act="show" class="primary" title="show in the slot">show</button>')}</td>
-    </tr>`;
-  }).join('');
+  if (S.view === 'flat') {
+    tb.innerHTML = rows.map(rowHTML).join('');
+  } else {
+    const byName = Object.fromEntries(rows.map(r => [r.name, r]));
+    let html = '';
+    for (const g of S.groups) {
+      const members = (g.members || []).map(n => byName[n]).filter(Boolean);
+      if (!members.length) continue; // empty (or fully filtered out) groups are not shown
+      const collapsed = !!S.collapsed[g.name];
+      html += groupRowHTML(g, members.length, collapsed);
+      if (!collapsed) html += sortRows(members).map(rowHTML).join('');
+    }
+    const loose = rows.filter(r => !(r.groups || []).length);
+    if (loose.length) {
+      const collapsed = !!S.collapsed[NOGROUP];
+      html += groupRowHTML(null, loose.length, collapsed);
+      if (!collapsed) html += loose.map(rowHTML).join('');
+    }
+    tb.innerHTML = html;
+  }
   $('#count').textContent = `${rows.length}/${S.items.length}`;
+  $('#btn-view').textContent = S.view;
   $('#empty').classList.toggle('hidden', S.items.length > 0);
   $('#list').classList.toggle('hidden', S.items.length === 0);
 }
@@ -145,6 +205,7 @@ function renderStatus() {
   chips.push(disp ? h`<span class="chip blue">displayed: <b>${disp.id}</b> ${disp.desc}</span>` : h`<span class="chip">nothing displayed</span>`);
   const parked = S.items.filter(i => i.state === 'parked').length;
   if (parked) chips.push(h`<span class="chip">lot: ${parked} parked</span>`);
+  for (const g of S.groups.filter(g => g.current)) chips.push(h`<span class="chip current" title="${g.desc || g.kind || ''}">${g.kind || 'group'}: <b>${g.name}</b> · ${daysLeftText(g)}</span>`);
   if (st.focused_workspace) chips.push(h`<span class="chip" title="focused workspace">on ${st.focused_workspace}</span>`);
   el.innerHTML = chips.join('');
   $('#btn-park').disabled = !st.displayed;
@@ -165,6 +226,7 @@ function renderDetail() {
   pane.innerHTML = h`
     <div class="d-head"><h2>${d.id}</h2><span class="desc">${d.desc}</span>
       <span class="badge cat-${d.category}">${d.category}</span>
+      ${raw((d.groups || []).map(x => h`<span class="badge group">${x}</span>`).join(''))}
       <span class="badge ${d.state}">${stateGlyph(d.state)} ${d.state}${d.shown ? ' · ' + ago(d.shown) : ''}</span></div>
     <div class="d-sub">${short(d.dir)}</div>
     <div class="d-actions sm">
@@ -212,6 +274,12 @@ function renderDetail() {
         <input name="status" placeholder="status" style="width:80px">
         <button class="primary">add</button>
       </form>
+    </fieldset>
+
+    <fieldset><legend>groups</legend>
+      <div class="gchecks">${raw(S.groups.map(g => h`<label><input type="checkbox" data-gcheck="${g.name}" ${(d.groups || []).includes(g.name) ? 'checked' : ''}> <span class="mono">${g.name}</span> <span class="muted">${[g.kind, dateRange(g), g.current ? 'current' : ''].filter(Boolean).join(' · ')}</span></label>`).join(''))}
+        ${S.groups.length ? '' : raw('<span class="muted small">no groups yet</span>')}</div>
+      <form id="f-group" class="row sm"><input name="name" placeholder="new group name" style="flex:1;min-width:160px"><button class="primary">add to group</button></form>
     </fieldset>
 
     <fieldset><legend>TODO.md <span class="muted" id="todo-open"></span></legend>
@@ -329,7 +397,7 @@ async function select(name) {
 
 // ------------------------------------------------------------------ create modal
 
-function openModal(title, bodyHTML) { $('#modal-title').textContent = title; $('#modal-body').innerHTML = bodyHTML; $('#modal').classList.remove('hidden'); }
+function openModal(title, bodyHTML, wide = false) { $('#modal-title').textContent = title; $('#modal-body').innerHTML = bodyHTML; $('#modal .modal-box').classList.toggle('wide', wide); $('#modal').classList.remove('hidden'); }
 function closeModal() { $('#modal').classList.add('hidden'); $('#modal-body').innerHTML = ''; }
 
 function openCreate() {
@@ -341,6 +409,7 @@ function openCreate() {
       <label>category</label><input name="category" list="cats2" placeholder="${esc(S.config ? S.config.default_category : 'personal')} unless a ticket is given">
       <label>id</label><input name="id" placeholder="optional; default: ticket key or ${esc(S.config ? S.config.id_prefix : 'me')}-NNNN">
       <label>pull request</label><input name="pr" type="url" placeholder="https://… (optional)">
+      <label>groups</label><div class="row sm">${S.groups.map(g => `<label class="chk"><input type="checkbox" name="groups" value="${esc(g.name)}" ${g.current ? 'checked' : ''}> <span class="mono">${esc(g.name)}</span></label>`).join('')}<input name="newgroup" placeholder="or a new group" style="width:160px"></div>
       <label>code</label>
       <div class="radio-group">
         <label><input type="radio" name="code" value="repo" ${repos.length ? 'checked' : 'disabled'}> worktree of
@@ -357,6 +426,7 @@ function openCreate() {
   const go = busy($('#new-go'), async () => {
     const f = $('#f-new'); const fd = new FormData(f);
     const body = { desc: fd.get('desc'), jira: fd.get('jira'), category: fd.get('category'), id: fd.get('id'), pr: fd.get('pr'), show: fd.get('show') === 'on' };
+    body.groups = fd.getAll('groups'); if ((fd.get('newgroup') || '').trim()) body.groups.push(fd.get('newgroup').trim());
     const code = fd.get('code');
     if (code === 'repo') { body.repo = fd.get('repo'); body.branch = fd.get('branch'); body.base = fd.get('base'); body.no_fetch = fd.get('no_fetch') === 'on'; }
     if (code === 'dir') { body.code_dir = fd.get('code_dir'); if (!body.code_dir) throw new Error('directory is required'); }
@@ -372,9 +442,72 @@ function openCreate() {
   setTimeout(() => $('#f-new [name=desc]').focus(), 30);
 }
 
+// ------------------------------------------------------------------ groups modal
+
+function groupEditRow(g) {
+  const isNew = !g;
+  g = g || { name: '', kind: '', start: '', end: '', desc: '', count: 0 };
+  return h`<tr data-gname="${g.name}" class="${isNew ? 'gnew' : ''}">
+    <td>${isNew ? raw('<input class="gname" name="name" placeholder="name (e.g. a sprint)">') : raw(h`<span class="mono">${g.name}</span>${g.current ? raw(' <span class="badge current">current</span>') : ''}`)}</td>
+    <td><input class="gkind" name="kind" value="${g.kind || ''}" placeholder="sprint" list="kinds"></td>
+    <td><input type="date" name="start" value="${g.start || ''}"></td>
+    <td><input type="date" name="end" value="${g.end || ''}"></td>
+    <td><input class="gdesc" name="desc" value="${g.desc || ''}" placeholder="description"></td>
+    <td class="mono muted" title="members">${isNew ? '' : g.count}</td>
+    <td class="actions sm">${isNew ? raw('<button class="primary" data-gact="create">create</button>') : raw(h`<button class="primary" data-gact="save">save</button><button class="danger icon" data-gact="delete" title="forget this group's metadata${g.count ? ' (members keep the tag unless you confirm untagging)' : ''}">×</button>`)}</td>
+  </tr>`;
+}
+
+function openGroups(focusName) {
+  openModal('groups', `
+    <p class="hint" style="margin:0 0 10px">A group is any bucket — a sprint, a project, a date range. Membership is a tag on each workstream (tick groups in a workstream's detail pane); this is the metadata: kind, dates (groups are ordered by end date), description. Groups without members are hidden from the list but kept here.</p>
+    <table class="groups"><thead><tr><th>name</th><th>kind</th><th>start</th><th>end</th><th>description</th><th>#</th><th></th></tr></thead>
+    <tbody>${S.groups.map(g => groupEditRow(g)).join('')}${groupEditRow(null)}</tbody></table>
+    <datalist id="kinds"><option value="sprint"><option value="project"><option value="bucket"><option value="dates"></datalist>
+    <div class="modal-foot"><button id="groups-close">close</button></div>`, true);
+  $('#groups-close').onclick = closeModal;
+  if (focusName) { const row = $(`#modal tr[data-gname="${CSS.escape(focusName)}"]`); if (row) { row.querySelector('input[name=end]').focus(); } }
+}
+
+async function groupAction(act, tr) {
+  const name = tr.dataset.gname || (tr.querySelector('input[name=name]') || {}).value;
+  const body = {};
+  for (const k of ['kind', 'start', 'end', 'desc']) body[k] = tr.querySelector(`input[name=${k}]`).value.trim();
+  if (act === 'create' || act === 'save') {
+    if (!name || !name.trim()) throw new Error('a group name is required');
+    await PUT(`/api/v1/groups/${encodeURIComponent(name.trim())}`, body);
+    toast(act === 'create' ? `group ${name.trim()} created — tag workstreams into it from their detail pane` : `saved ${name}`, 'ok');
+  } else if (act === 'delete') {
+    const g = S.groups.find(x => x.name === name);
+    let untag = false;
+    if (g && g.count) { untag = confirm(`${name} has ${g.count} member(s).\n\nOK: remove the tag from them too.\nCancel: keep the tags, only forget the metadata.`); }
+    else if (!confirm(`Forget group ${name}?`)) return;
+    const r = await DEL(`/api/v1/groups/${encodeURIComponent(name)}?untag=${untag}`);
+    toast(`removed ${name}` + (r.untagged ? ` (untagged ${r.untagged})` : ''), 'ok');
+  }
+  await refreshAll();
+  openGroups();
+}
+
 // ------------------------------------------------------------------ wiring
 
 document.addEventListener('click', async (e) => {
+  const gbtn = e.target.closest('button[data-gact]');
+  if (gbtn) {
+    e.stopPropagation();
+    const tr = gbtn.closest('tr');
+    if (gbtn.dataset.gact === 'edit') { openGroups(tr.dataset.group); return; }
+    await busy(gbtn, () => groupAction(gbtn.dataset.gact, tr))();
+    return;
+  }
+  const grow = e.target.closest('tr.group-row');
+  if (grow) {
+    const key = grow.dataset.group;
+    S.collapsed[key] = !S.collapsed[key];
+    localStorage.setItem('jug.collapsed', JSON.stringify(S.collapsed));
+    render();
+    return;
+  }
   const btn = e.target.closest('button[data-act]');
   if (btn) {
     const tr = btn.closest('tr[data-name]');
@@ -392,6 +525,10 @@ document.addEventListener('click', async (e) => {
 });
 document.addEventListener('change', async (e) => {
   if (e.target.id === 'cands-all' && S.detail) { S.candsAll = e.target.checked; await act(S.detail.name, 'cands', null); }
+  if (e.target.dataset && e.target.dataset.gcheck !== undefined && S.detail) {
+    const groups = $$('#detail-pane input[data-gcheck]').filter(c => c.checked).map(c => c.dataset.gcheck);
+    await busy(null, async () => { await PATCH(wsPath(S.detail.name), { groups }); toast('groups saved', 'ok'); await refreshAll(); })();
+  }
 });
 document.addEventListener('submit', async (e) => {
   const f = e.target; if (!S.detail) return;
@@ -413,6 +550,10 @@ document.addEventListener('submit', async (e) => {
   } else if (fid === 'f-ref') {
     e.preventDefault();
     await busy(f.querySelector('button'), async () => { await POST(p + '/refs', { type: fd.get('type'), value: fd.get('value'), title: fd.get('title'), status: fd.get('status') }); toast('ref added', 'ok'); await loadDetail(S.detail.name, { keepTodo: true }); scheduleRefresh(50); })();
+  } else if (fid === 'f-group') {
+    e.preventDefault();
+    const name = (fd.get('name') || '').trim(); if (!name) return;
+    await busy(f.querySelector('button'), async () => { await POST(`/api/v1/groups/${encodeURIComponent(name)}/members`, { workstreams: [S.detail.name] }); toast(`added to ${name}`, 'ok'); await refreshAll(); await loadDetail(S.detail.name, { keepTodo: true }); })();
   } else if (fid === 'f-wt') {
     e.preventDefault();
     await busy(f.querySelector('button'), async () => { const r = await POST(p + '/repo', { repo: fd.get('repo'), branch: fd.get('branch'), base: fd.get('base'), no_fetch: fd.get('no_fetch') === 'on' }); toast(r.worktree.what + (r.worktree.seeded && r.worktree.seeded.length ? ' · seeded ' + r.worktree.seeded.join(', ') : ''), 'ok'); if (S.detail.state !== 'none') toast('windows already open still use the old directory: close and show again to start them in the worktree'); await loadDetail(S.detail.name, { keepTodo: true }); scheduleRefresh(50); })();
@@ -424,6 +565,8 @@ document.addEventListener('click', async (e) => {
 });
 
 $('#btn-new').onclick = openCreate;
+$('#btn-groups').onclick = () => openGroups();
+$('#btn-view').onclick = () => { S.view = S.view === 'grouped' ? 'flat' : 'grouped'; localStorage.setItem('jug.view', S.view); render(); };
 $('#empty-new').onclick = (e) => { e.preventDefault(); openCreate(); };
 $('#btn-toggle').onclick = busy($('#btn-toggle'), async () => { const r = await POST('/api/v1/slot/toggle'); toast(r.on ? `workspace ${r.slot.num} is now the slot` : 'slot released', 'ok'); scheduleRefresh(50); });
 $('#btn-park').onclick = busy($('#btn-park'), async () => { await POST('/api/v1/slot/park'); toast('parked', 'ok'); scheduleRefresh(50); });
@@ -436,6 +579,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') { if (!$('#modal').classList.contains('hidden')) closeModal(); }
   if (e.key === '/' && !/input|textarea|select/i.test(document.activeElement.tagName)) { e.preventDefault(); $('#filter').focus(); }
   if (e.key === 'n' && e.altKey) { e.preventDefault(); openCreate(); }
+  if (e.key === 'g' && e.altKey) { e.preventDefault(); openGroups(); }
 });
 window.addEventListener('beforeunload', (e) => { if (S.todo && S.todo.dirty) { e.preventDefault(); e.returnValue = ''; } });
 

@@ -12,6 +12,8 @@
   <div class="brand"><span class="logo"></span><span>juggler</span><span id="live" class="dot" title="live updates"></span></div>
   <div id="status" class="status"></div>
   <div class="actions">
+    <button id="btn-view" title="grouped / flat list">grouped</button>
+    <button id="btn-groups" title="manage groups (Alt+G)">groups…</button>
     <button id="btn-toggle" title="toggle the focused workspace as the slot">slot</button>
     <button id="btn-park" title="hide the displayed workstream">park</button>
     <button id="btn-lot" title="visit the lot / come back">lot</button>
@@ -22,7 +24,7 @@
 <main>
   <section id="list-pane">
     <div class="toolbar">
-      <input id="filter" type="search" placeholder="filter  (id, description, category, branch, ref…)   /" autocomplete="off">
+      <input id="filter" type="search" placeholder="filter  (id, description, category, group, branch, ref…)   /" autocomplete="off">
       <label class="chk"><input id="only-live" type="checkbox"> live only</label>
       <span id="count" class="muted"></span>
     </div>

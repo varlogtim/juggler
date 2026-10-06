@@ -33,9 +33,10 @@ REST API and a web UI.
 per-workstream opencode sessions, git worktrees with seeded files, waybar
 module, dictation hook. Stage two: the same operations as a **REST API** and
 a **web UI** (`jug serve`, a systemd user service), with the CLI, the API and
-the UI sharing one service layer. Refs (ticket/PR) are still entered by hand;
-syncing them from Jira/GitHub and the opencode-side integration are next —
-see [Limitations and roadmap](#limitations-and-roadmap).
+the UI sharing one service layer; **groups** (sprints, projects, any bucket)
+to organize workstreams. Refs (ticket/PR) and groups are still entered by
+hand; syncing them from Jira/GitHub and the opencode-side integration are
+next — see [Limitations and roadmap](#limitations-and-roadmap).
 
 - [Concepts](#concepts)
 - [Install](#install)
@@ -101,6 +102,26 @@ workstream, say, its own virtualenv path; a seeded `.envrc` is
 Each ref caches a `title`, `status` and `updated` timestamp so the picker and
 the bar can show them without a network call. (Today these are written by
 `jug ref add`; keeping them fresh from Jira/GitHub is the next milestone.)
+
+**Groups.** A group is any bucket you want to see workstreams by — a sprint,
+a project, a date range, "backlog". It has two halves, kept apart on purpose:
+
+- **Membership is a tag on the workstream**: `groups = ["PCFS-S20-26.09.23-Nebula"]`
+  in its `workstream.toml`. That is the only place members are recorded, so a
+  group with no tagged workstreams has no members and is not shown, removing
+  a workstream leaves nothing dangling, and renaming one moves its tags along.
+  Tagging is what brings a group into existence.
+- **Metadata lives once, in `<root>/groups.toml`**: `kind` (free text:
+  `sprint`, `project`, `bucket`, …), `start`, `end`, `desc`. A sprint's dates
+  are a fact about the sprint, not about each ticket in it; copying them onto
+  N workstreams would mean N edits when the sprint shifts. A group may be
+  tagged but unregistered (no dates; sorts last) or registered but empty (next
+  sprint, created ahead; hidden from the main views, editable in the groups
+  view).
+
+Groups are ordered by **end date** (undated ones after, by name); the one
+whose `[start, end]` contains today is *current*. A workstream can be in
+several groups and is listed under each.
 
 **The slot.** One workspace you choose, at any time, to be where workstreams
 are displayed. Toggling a workspace into the slot renames it (its label
@@ -381,6 +402,27 @@ the workstream directory — notes included, so archive first if you want them.
 `●` displayed, `◐` parked (alive), `○` not open. Displayed first, then parked
 by last shown, then the rest by creation.
 
+### UC14 — See the week by sprint (or project, or anything)
+
+```sh
+jug group set PCFS-S20-26.09.23-Nebula --kind sprint --start 2026-09-23 --end 2026-10-06 --desc "Team Nebula sprint 20"
+jug group set backlog --kind bucket --desc "assigned, not in a sprint"
+jug group add PCFS-S20-26.09.23-Nebula AISW-53270 AISW-53350     # tag (creates the group if needed)
+jug group add backlog AISW-52932
+jug group ls             # groups with members, current one starred, days left
+jug ls --group backlog   # just those
+jug add --jira AISW-9 --group PCFS-S21-26.10.07-Nebula --repo ezaddon-mlis "next thing"
+```
+
+The web UI's default view is **grouped**: one collapsible section per
+group in end-date order (current sprint first, with its days left in the
+header), then `backlog`, then *no group* for the rest; *flat* is one click
+away. *groups…* edits the metadata (dates with a date picker) and pre-creates
+groups; a workstream's detail pane has a checkbox per group and an "add to
+group" box for a new one. This is the shape the Jira sync (next stage) fills
+in by itself: one group per sprint with the sprint's dates, each ticket
+tagged with its sprint, the rest tagged `backlog`.
+
 ### UC13 — Manage everything from a browser
 
 `make service-install && make service-enable`, then open
@@ -412,13 +454,18 @@ jug env [--ws WS]                export JUG_* for a shell: eval "$(jug env)"
 jug session [--ws WS] [--relaunch]            the pinned opencode session (id, updated, dir, title)
 jug session pick [--all] [--relaunch]         adopt an existing session (titles matching id/refs; --all: everything)
 jug session pin ID | new | unpin [--relaunch] pin an id / create a fresh titled one / forget the pin
-jug ls [--json]                  all workstreams
-jug add [--category C] [--id ID] [--jira KEY] [--pr URL] [--show] DESC…
+jug ls [--group G] [--json]      all workstreams (or those tagged G)
+jug add [--category C] [--id ID] [--jira KEY] [--pr URL] [--group G]… [--show] DESC…
         [--code-dir D | --repo NAME|PATH [--branch B] [--base BASE] [--no-fetch]]
 jug repo add --repo NAME|PATH [--branch B] [--base BASE] [--ws WS]   worktree for an existing workstream
 jug repo seed [--ws WS] [--force]                                   (re)copy the repo's seed files into the worktree
 jug set WS [--category C] [--id ID] [--desc D] [--jira KEY]   rename / recategorize (directory follows)
 jug rm WS [--yes] [--force]      remove: windows, worktree (branch kept), directory
+jug group ls [--all] [--json]    groups with members (--all: registered-but-empty too); * = current
+jug group show G [--json]        one group and its members
+jug group set G [--kind K] [--start D] [--end D] [--desc T]    create / update metadata
+jug group add G WS… | group remove G WS…                        tag / untag
+jug group rm G [--untag]         forget the metadata (--untag: remove the tag from members too)
 jug ref add TYPE VALUE [--title T] [--status S] [--ws WS]
 jug ref rm TYPE [KEY|URL] [--ws WS]
 jug ref ls [--ws WS]
@@ -443,17 +490,19 @@ the compositor, answers `503 sway_unavailable` for window operations until
 sway is there).
 
 **The UI** (`http://127.0.0.1:7474/`): the header shows the slot, what is
-displayed, how many are parked, and has *slot here / park / lot / + new*;
-the table lists every workstream (state glyph, id, category, description,
-refs with their cached status, open TODO count, branch with a *dirty* badge,
-session) with a filter box (`/` focuses it) and a *show*/*focus* button per
-row. Clicking a row opens the detail pane: actions (show, focus, park, term,
+displayed, how many are parked, the current group with its days left, and
+has *grouped/flat*, *groups…*, *slot here / park / lot / + new*; the table
+lists every workstream (state glyph, id, category, description, refs with
+their cached status, open TODO count, branch with a *dirty* badge, session)
+— grouped into collapsible sections in group order by default — with a
+filter box (`/` focuses it) and a *show*/*focus* button per row. Clicking a row opens the detail pane: actions (show, focus, park, term,
 notes, review, open jira/pr, dictate, close windows), an **edit** form
 (category, id, description, ticket — the directory follows), **code**
 (branch, head, upstream, worktree-of; *add worktree* / *re-seed*), **refs**
-(add/remove/open), a **TODO.md** editor, the **opencode session** (what is
-pinned, choose an existing session, new, relaunch, unpin) and **remove** with
-the same dry-run the CLI prints. It updates live: the page subscribes to
+(add/remove/open), **groups** (a checkbox per known group, a box for a new
+one), a **TODO.md** editor, the **opencode session** (what is pinned, choose
+an existing session, new, relaunch, unpin) and **remove** with the same
+dry-run the CLI prints. It updates live: the page subscribes to
 `/api/v1/events`, which relays sway workspace/window events (debounced) and
 the server's own mutations.
 
@@ -476,10 +525,16 @@ Do not put it behind a reverse proxy.
 | `POST /slot/toggle` | `jug toggle` | `{on, slot}` |
 | `POST /slot/park` · `/slot/park-others` | `jug park` · `jug park --others` | |
 | `POST /lot` | `jug lot` | 409 when nothing is parked |
-| `GET /workstreams` | `jug ls --json` | `[WorkstreamInfo]` |
-| `POST /workstreams` | `jug add` | `{desc, jira, category, id, pr, code_dir \| repo, branch, base, no_fetch, show}` → 201 `{workstream, worktree, warnings}` |
+| `GET /groups?all=true` | `jug group ls [--all]` | `[GroupInfo]` in group order; without `all` only groups with members |
+| `GET /groups/{name}` | `jug group show` | `GroupInfo` (registered or merely in use) |
+| `PUT /groups/{name}` | `jug group set` | `{kind, start, end, desc}` (fields present are set; `""` clears) |
+| `DELETE /groups/{name}?untag=true` | `jug group rm [--untag]` | `{removed, untagged}` |
+| `POST /groups/{name}/members` | `jug group add` | `{workstreams: [ws…]}` → `GroupInfo` |
+| `DELETE /groups/{name}/members/{ws}` | `jug group remove` | 404 when not a member |
+| `GET /workstreams?group=NAME` | `jug ls --group` | `[WorkstreamInfo]` |
+| `POST /workstreams` | `jug add` | `{desc, jira, category, id, pr, groups, code_dir \| repo, branch, base, no_fetch, show}` → 201 `{workstream, worktree, warnings}` |
 | `GET /workstreams/{ws}` | one `WorkstreamInfo` | |
-| `PATCH /workstreams/{ws}` | `jug set` | `{category, id, desc, jira}` (any subset) → `{result, workstream}` |
+| `PATCH /workstreams/{ws}` | `jug set` / retag | `{category, id, desc, jira, groups}` (any subset; `groups` replaces the tags) → `{result, workstream}` |
 | `DELETE /workstreams/{ws}?force=true` | `jug rm --yes [--force]` | 409 `dirty` without force |
 | `GET /workstreams/{ws}/plan` | the `jug rm` dry run | `{has_worktree, worktree, branch, dirty}` |
 | `GET /workstreams/{ws}/env` | `jug env` | `{JUG_WORKSTREAM, …}` |
@@ -506,8 +561,17 @@ Do not put it behind a reverse proxy.
   "desc": "disagg toggle requires pause", "created": "…", "dir": "/home/me/workstreams/work_AISW-53270_…",
   "code_dir": "src/ezaddon-mlis", "code_path": "/home/me/workstreams/…/src/ezaddon-mlis", "code_inside": true, "has_code": true,
   "refs": [{ "type": "jira", "key": "AISW-53270", "url": "https://…/browse/AISW-53270", "status": "Blocked" }],
+  "groups": ["PCFS-S20-26.09.23-Nebula"],
   "opencode_session": "ses_…", "state": "parked", "todos_open": 5, "shown": "2026-10-05T12:00:00-04:00",
   "git": { "branch": "tim/aisw-53270-…", "head": "48faeb67", "dirty": false, "linked": true, "main": "/home/me/src/ezaddon-mlis", "upstream": "origin/…", "ahead": 0, "behind": 0 } }
+```
+
+`GroupInfo`:
+
+```json
+{ "name": "PCFS-S20-26.09.23-Nebula", "kind": "sprint", "desc": "Team Nebula sprint 20",
+  "start": "2026-09-23", "end": "2026-10-06", "registered": true, "current": true, "days_left": 2,
+  "members": ["work_AISW-53270_…", "work_AISW-53350_…"], "count": 2 }
 ```
 
 Copy/pasta:
@@ -677,10 +741,16 @@ that are not hotkeys.
 | 42 | web | *remove workstream…* → read the plan → confirm | row gone, directory gone, worktree removed (`git worktree list`), branch kept |
 | 43 | api | `curl -s -X POST …/workstreams/nope/show` and `curl -s …/workstreams/x` with the service stopped | `404 not_found` / connection refused; with sway gone (e.g. from a tty) every window endpoint answers `503 sway_unavailable` and CRUD still works |
 | 44 | api | `JUG_SERVE_ANY= jug serve --listen 0.0.0.0:7474` | refuses to start |
+| 45 | UC14 | `jug group set s-now --kind sprint --start <today> --end <today+13>`; `jug group set s-next --start <today+14> --end <today+27>`; `jug group add s-now <ws>` | `jug group ls` shows `s-now *` with 14d left and 1 member, not `s-next`; `--all` shows both, `s-now` first; `~/workstreams/groups.toml` has both, the workstream's `workstream.toml` has `groups = ["s-now"]` |
+| 46 | UC14 | web UI, grouped view | a section per group in end-date order (current one with the green bar and "Nd left"), then *no group*; clicking a header collapses it and the state survives a reload; the header chip shows `sprint: s-now · 14d left` |
+| 47 | UC14 | in a workstream's detail pane tick `s-next`, then untick `s-now`; type a new name in "add to group" | each change saves (`jug ls --group …`), the list regroups live; the new group appears as a section; unticking the last member of an unregistered group makes it disappear |
+| 48 | UC14 | *groups…*: change `s-now`'s end date with the picker, save; create `proj-x` with no dates; delete `s-next` (empty) and then `s-now` (choose "untag") | `jug group ls --all` reflects each step; after the last one the workstream has no `s-now` tag |
+| 49 | UC14 | `jug group set x --start 2026-02-01 --end 2026-01-01`; `jug group add "a/b" <ws>` | both rejected with a reason |
 
 Automated: `make test` (store naming/resolution, picker rows and the
-new-workstream spec, sway-safe shell quoting, the service layer's store-only
-paths, and the HTTP API end to end against a temp store without sway). The
+new-workstream spec, sway-safe shell quoting, group validation/ordering and
+the registry, the service layer's store-only paths, and the HTTP API end to
+end against a temp store without sway). The
 sway mechanics are covered by `make poc` and `make poc-lot`; `make ui-shot`
 renders the UI headlessly (list + detail) and fails on console errors.
 
@@ -715,10 +785,12 @@ renders the UI headlessly (list + detail) and fails on console errors.
 - **A sway restart loses the windows** (not the files): juggler rebuilds a
   workstream the next time you show it and `opencode -s <pinned id>` resumes
   the conversation.
-- **Refs are static** until the importer lands (`jug sync`, stage three): a timer
-  that queries Jira for tickets assigned to you and GitHub for the branch's
-  PR, writes the cached `status`/`title`/`updated`, and can create workstreams
-  for new tickets. The data model already has the fields.
+- **Refs and groups are static** until the importer lands (`jug sync`, stage
+  three): a timer that queries Jira for tickets assigned to you and GitHub
+  for the branch's PR, writes the cached `status`/`title`/`updated`, creates
+  workstreams for new tickets, registers each sprint as a group with its
+  dates and tags tickets into their sprint or `backlog`. The data model
+  already has the fields.
 - **opencode integration** (stage three): a skill so the assistant keeps `TODO.md`
   current, records follow-up tickets there, and calls `jug ref add` /
   `jug open pr` when it opens a PR.
