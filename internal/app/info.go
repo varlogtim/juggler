@@ -29,6 +29,7 @@ type WorkstreamInfo struct {
 	CodeInside      bool        `json:"code_inside"` // the code dir lives in the workstream dir
 	HasCode         bool        `json:"has_code"`    // a code dir is configured
 	Refs            []store.Ref `json:"refs"`
+	Groups          []string    `json:"groups"`
 	OpencodeSession string      `json:"opencode_session,omitempty"`
 	State           string      `json:"state"` // displayed | parked | none
 	TodosOpen       int         `json:"todos_open"`
@@ -42,10 +43,13 @@ func (a *App) InfoOf(w *store.Workstream, tree *sway.Node, st *store.State) Work
 	in := WorkstreamInfo{
 		Name: w.Name(), ID: w.ID, Category: w.Category, Desc: w.Desc, Created: w.Created, Dir: w.Dir,
 		CodeDir: w.CodeDir, CodePath: w.ResolvedCodeDir(), CodeInside: w.CodeInside(), HasCode: w.CodeDir != "",
-		Refs: w.Refs, OpencodeSession: w.OpencodeSession, State: "none", TodosOpen: w.OpenTodos(),
+		Refs: w.Refs, Groups: w.Groups, OpencodeSession: w.OpencodeSession, State: "none", TodosOpen: w.OpenTodos(),
 	}
 	if in.Refs == nil {
 		in.Refs = []store.Ref{}
+	}
+	if in.Groups == nil {
+		in.Groups = []string{}
 	}
 	if tree != nil && st != nil {
 		probe := &layout.Engine{Cfg: a.Cfg, State: st}

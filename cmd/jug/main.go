@@ -60,8 +60,8 @@ inside the displayed workstream (default --ws: $JUG_WORKSTREAM, else the display
                          --relaunch restarts the workstream's opencode on the new session
 
 workstreams
-  ls [--json]            list workstreams (--json: the same objects the REST API returns)
-  add [--category C] [--id ID] [--jira KEY] [--pr URL] [--show] DESC…
+  ls [--group G] [--json] list workstreams (--json: the same objects the REST API returns)
+  add [--category C] [--id ID] [--jira KEY] [--pr URL] [--group G]… [--show] DESC…
       [--code-dir DIR | --repo NAME|PATH [--branch B] [--base BASE] [--no-fetch]]
                          create <C>_<ID>_<slug>/ under the root (default C: personal, ID: <user>-NNNN);
                          --repo gives it its own git worktree at <ws>/src/<repo> (branch default:
@@ -82,6 +82,17 @@ workstreams
   close WS               kill the workstream's windows (files are kept)
   rm WS --yes [--force]  close its windows, remove its worktree (refuses if dirty unless --force;
                          the branch is kept) and delete the workstream directory
+
+groups (a sprint, a project, a date range — any bucket; ordered by end date)
+  group ls [--all] [--json]
+                         groups that have members (--all: registered-but-empty ones too)
+  group show G [--json]  one group and its members
+  group set G [--kind K] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--desc T]
+                         create or update the group's metadata (membership is a tag on each
+                         workstream, see "group add"; an empty value clears a field)
+  group add G WS…        tag workstreams into G (this is what makes a group exist)
+  group remove G WS…     untag
+  group rm G [--untag]   forget the metadata; --untag also removes the tag from every member
 
 server
   serve [--listen ADDR]  REST API + web UI (default 127.0.0.1:7474); see README "Web UI and REST API"
@@ -143,6 +154,8 @@ func run(args []string) int {
 		return c.ref(rest)
 	case "repo":
 		return c.repo(rest)
+	case "group":
+		return c.group(rest)
 	case "doctor":
 		return c.doctor()
 	case "serve":
@@ -856,19 +869,36 @@ func trunc(s string, n int) string {
 // ---------------------------------------------------------------- store verbs
 
 func (c *cli) ls(args []string) int {
-	asJSON := len(args) == 1 && args[0] == "--json"
+	fs := flag.NewFlagSet("ls", flag.ContinueOnError)
+	asJSON := fs.Bool("json", false, "")
+	group := fs.String("group", "", "only workstreams tagged with this group")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
 	infos, err := c.app.Infos()
 	if err != nil {
 		return fail(err)
 	}
-	if asJSON {
+	if *group != "" {
+		var kept []app.WorkstreamInfo
+		for _, in := range infos {
+			for _, g := range in.Groups {
+				if g == *group {
+					kept = append(kept, in)
+					break
+				}
+			}
+		}
+		infos = kept
+	}
+	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		enc.Encode(infos)
 		return 0
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "STATE\tID\tCATEGORY\tDESC\tJIRA\tPR\tTODO\tSESSION\tCODE DIR\tBRANCH")
+	fmt.Fprintln(tw, "STATE\tID\tCATEGORY\tDESC\tJIRA\tPR\tTODO\tSESSION\tCODE DIR\tBRANCH\tGROUPS")
 	for _, in := range infos {
 		state := "-"
 		if in.State != "none" {
@@ -908,10 +938,23 @@ func (c *cli) ls(args []string) int {
 				branch += "*"
 			}
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n", state, in.ID, in.Category, in.Desc, jira, pr, in.TodosOpen, sess, code, branch)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\n", state, in.ID, in.Category, in.Desc, jira, pr, in.TodosOpen, sess, code, branch, strings.Join(in.Groups, ","))
 	}
 	tw.Flush()
 	return 0
+}
+
+// multiFlag collects a repeatable flag (also accepts comma-separated values).
+type multiFlag []string
+
+func (m *multiFlag) String() string { return strings.Join(*m, ",") }
+func (m *multiFlag) Set(v string) error {
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			*m = append(*m, p)
+		}
+	}
+	return nil
 }
 
 type wtOpts struct {
@@ -935,12 +978,15 @@ func (c *cli) add(args []string) int {
 	fs.StringVar(&o.CodeDir, "code-dir", "", "")
 	fs.StringVar(&o.Jira, "jira", "", "")
 	fs.StringVar(&o.PR, "pr", "", "")
+	var groups multiFlag
+	fs.Var(&groups, "group", "tag into a group (repeatable, or comma-separated)")
 	show := fs.Bool("show", false, "")
 	wt := wtFlags(fs)
 	if err := fs.Parse(args); err != nil || fs.NArg() == 0 {
-		fmt.Fprintln(os.Stderr, "usage: jug add [--category C] [--id ID] [--jira KEY] [--pr URL] [--show] [--code-dir DIR | --repo NAME|PATH [--branch B] [--base BASE] [--no-fetch]] DESC…")
+		fmt.Fprintln(os.Stderr, "usage: jug add [--category C] [--id ID] [--jira KEY] [--pr URL] [--group G]… [--show] [--code-dir DIR | --repo NAME|PATH [--branch B] [--base BASE] [--no-fetch]] DESC…")
 		return 2
 	}
+	o.Groups = groups
 	if o.CodeDir != "" && wt.o.Repo != "" {
 		return fail(errors.New("--code-dir and --repo are mutually exclusive"))
 	}
@@ -1051,6 +1097,132 @@ func (c *cli) rm(args []string) int {
 	}
 	fmt.Printf("removed %s\n", w.Name())
 	return 0
+}
+
+// ---------------------------------------------------------------- groups
+
+func (c *cli) group(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: jug group ls|show|set|add|remove|rm … (see jug help)")
+		return 2
+	}
+	sub, rest := args[0], args[1:]
+	switch sub {
+	case "ls":
+		fs := flag.NewFlagSet("group ls", flag.ContinueOnError)
+		all := fs.Bool("all", false, "")
+		asJSON := fs.Bool("json", false, "")
+		if err := fs.Parse(rest); err != nil {
+			return 2
+		}
+		gs, err := c.app.Groups(*all)
+		if err != nil {
+			return fail(err)
+		}
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			enc.Encode(gs)
+			return 0
+		}
+		tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(tw, "GROUP\tKIND\tSTART\tEND\tLEFT\tMEMBERS\tDESC")
+		for _, g := range gs {
+			left := ""
+			if g.DaysLeft != nil {
+				left = fmt.Sprintf("%dd", *g.DaysLeft)
+			}
+			name := g.Name
+			if g.Current {
+				name += " *"
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\n", name, g.Kind, g.Start, g.End, left, g.Count, g.Desc)
+		}
+		tw.Flush()
+		return 0
+	case "show":
+		fs := flag.NewFlagSet("group show", flag.ContinueOnError)
+		asJSON := fs.Bool("json", false, "")
+		pos, err := parseMixed(fs, rest)
+		if err != nil || len(pos) != 1 {
+			fmt.Fprintln(os.Stderr, "usage: jug group show G [--json]")
+			return 2
+		}
+		g, err := c.app.Group(pos[0])
+		if err != nil {
+			return fail(err)
+		}
+		if *asJSON {
+			json.NewEncoder(os.Stdout).Encode(g)
+			return 0
+		}
+		fmt.Printf("%s\tkind=%s start=%s end=%s current=%v registered=%v\n", g.Name, g.Kind, g.Start, g.End, g.Current, g.Registered)
+		if g.Desc != "" {
+			fmt.Printf("\t%s\n", g.Desc)
+		}
+		for _, m := range g.Members {
+			fmt.Println("  " + m)
+		}
+		return 0
+	case "set":
+		fs := flag.NewFlagSet("group set", flag.ContinueOnError)
+		var p app.GroupPatch
+		fs.Func("kind", "", func(v string) error { p.Kind = &v; return nil })
+		fs.Func("desc", "", func(v string) error { p.Desc = &v; return nil })
+		fs.Func("start", "YYYY-MM-DD", func(v string) error { p.Start = &v; return nil })
+		fs.Func("end", "YYYY-MM-DD", func(v string) error { p.End = &v; return nil })
+		pos, err := parseMixed(fs, rest)
+		if err != nil || len(pos) != 1 {
+			fmt.Fprintln(os.Stderr, "usage: jug group set G [--kind K] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--desc T]")
+			return 2
+		}
+		g, err := c.app.SetGroup(pos[0], p)
+		if err != nil {
+			return fail(err)
+		}
+		fmt.Printf("%s\tkind=%s start=%s end=%s\n", g.Name, g.Kind, g.Start, g.End)
+		return 0
+	case "add", "remove":
+		if len(rest) < 2 {
+			fmt.Fprintf(os.Stderr, "usage: jug group %s G WS…\n", sub)
+			return 2
+		}
+		name := rest[0]
+		for _, q := range rest[1:] {
+			w, err := c.app.Resolve(q)
+			if err != nil {
+				return fail(err)
+			}
+			if sub == "add" {
+				err = c.app.Tag(w, name)
+			} else {
+				err = c.app.Untag(w, name)
+			}
+			if err != nil {
+				return fail(err)
+			}
+			fmt.Printf("%s\t%s\n", w.ID, strings.Join(w.Groups, ","))
+		}
+		return 0
+	case "rm":
+		fs := flag.NewFlagSet("group rm", flag.ContinueOnError)
+		untag := fs.Bool("untag", false, "also remove the tag from every member")
+		pos, err := parseMixed(fs, rest)
+		if err != nil || len(pos) != 1 {
+			fmt.Fprintln(os.Stderr, "usage: jug group rm G [--untag]")
+			return 2
+		}
+		n, err := c.app.RemoveGroup(pos[0], *untag)
+		if err != nil {
+			return fail(err)
+		}
+		if n > 0 {
+			fmt.Printf("untagged %d workstream(s)\n", n)
+		}
+		return 0
+	}
+	fmt.Fprintf(os.Stderr, "jug group: unknown subcommand %q\n", sub)
+	return 2
 }
 
 func (c *cli) ref(args []string) int {

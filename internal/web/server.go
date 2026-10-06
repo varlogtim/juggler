@@ -92,6 +92,13 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/v1/slot/park-others", s.slotParkOthers)
 	m.HandleFunc("POST /api/v1/lot", s.lot)
 
+	m.HandleFunc("GET /api/v1/groups", s.groups)
+	m.HandleFunc("GET /api/v1/groups/{name}", s.groupGet)
+	m.HandleFunc("PUT /api/v1/groups/{name}", s.groupPut)
+	m.HandleFunc("DELETE /api/v1/groups/{name}", s.groupDelete)
+	m.HandleFunc("POST /api/v1/groups/{name}/members", s.groupAddMembers)
+	m.HandleFunc("DELETE /api/v1/groups/{name}/members/{ws}", s.groupRemoveMember)
+
 	m.HandleFunc("GET /api/v1/workstreams", s.list)
 	m.HandleFunc("POST /api/v1/workstreams", s.create)
 	m.HandleFunc("GET /api/v1/workstreams/{ws}", s.get)
@@ -312,22 +319,35 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	if g := r.URL.Query().Get("group"); g != "" {
+		kept := []app.WorkstreamInfo{}
+		for _, in := range infos {
+			for _, x := range in.Groups {
+				if x == g {
+					kept = append(kept, in)
+					break
+				}
+			}
+		}
+		infos = kept
+	}
 	writeJSON(w, 200, infos)
 }
 
 func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	var b struct {
-		Category string `json:"category"`
-		ID       string `json:"id"`
-		Desc     string `json:"desc"`
-		CodeDir  string `json:"code_dir"`
-		Jira     string `json:"jira"`
-		PR       string `json:"pr"`
-		Repo     string `json:"repo"`
-		Branch   string `json:"branch"`
-		Base     string `json:"base"`
-		NoFetch  bool   `json:"no_fetch"`
-		Show     bool   `json:"show"`
+		Category string   `json:"category"`
+		ID       string   `json:"id"`
+		Desc     string   `json:"desc"`
+		CodeDir  string   `json:"code_dir"`
+		Jira     string   `json:"jira"`
+		PR       string   `json:"pr"`
+		Repo     string   `json:"repo"`
+		Branch   string   `json:"branch"`
+		Base     string   `json:"base"`
+		NoFetch  bool     `json:"no_fetch"`
+		Show     bool     `json:"show"`
+		Groups   []string `json:"groups"`
 	}
 	if err := decode(r, &b); err != nil {
 		s.fail(w, err)
@@ -337,7 +357,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, badRequest{"code_dir and repo are mutually exclusive"})
 		return
 	}
-	ws, err := s.app.Create(app.CreateOptions{Category: b.Category, ID: b.ID, Desc: b.Desc, CodeDir: b.CodeDir, Jira: b.Jira, PR: b.PR})
+	ws, err := s.app.Create(app.CreateOptions{Category: b.Category, ID: b.ID, Desc: b.Desc, CodeDir: b.CodeDir, Jira: b.Jira, PR: b.PR, Groups: b.Groups})
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -375,14 +395,26 @@ func (s *Server) set(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var b struct {
-		Category *string `json:"category"`
-		ID       *string `json:"id"`
-		Desc     *string `json:"desc"`
-		Jira     *string `json:"jira"`
+		Category *string   `json:"category"`
+		ID       *string   `json:"id"`
+		Desc     *string   `json:"desc"`
+		Jira     *string   `json:"jira"`
+		Groups   *[]string `json:"groups"` // replaces the tags
 	}
 	if err := decode(r, &b); err != nil {
 		s.fail(w, err)
 		return
+	}
+	if b.Groups != nil {
+		if err := s.app.SetGroups(ws, *b.Groups); err != nil {
+			s.fail(w, err)
+			return
+		}
+		if b.Category == nil && b.ID == nil && b.Desc == nil && b.Jira == nil {
+			s.events.changed()
+			writeJSON(w, 200, map[string]any{"result": app.SetResult{OldName: ws.Name(), Name: ws.Name()}, "workstream": s.app.Info(ws)})
+			return
+		}
 	}
 	o := app.SetOptions{}
 	if b.Category != nil {
@@ -806,6 +838,111 @@ func (s *Server) sessionRelaunch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// ---------------------------------------------------------------- groups
+
+func (s *Server) groups(w http.ResponseWriter, r *http.Request) {
+	gs, err := s.app.Groups(r.URL.Query().Get("all") == "true")
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	if gs == nil {
+		gs = []app.GroupInfo{}
+	}
+	writeJSON(w, 200, gs)
+}
+
+func (s *Server) groupGet(w http.ResponseWriter, r *http.Request) {
+	g, err := s.app.Group(r.PathValue("name"))
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, 200, g)
+}
+
+func (s *Server) groupPut(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		Kind  *string `json:"kind"`
+		Desc  *string `json:"desc"`
+		Start *string `json:"start"`
+		End   *string `json:"end"`
+	}
+	if err := decode(r, &b); err != nil {
+		s.fail(w, err)
+		return
+	}
+	g, err := s.app.SetGroup(r.PathValue("name"), app.GroupPatch{Kind: b.Kind, Desc: b.Desc, Start: b.Start, End: b.End})
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	s.events.changed()
+	gi, _ := s.app.Group(g.Name)
+	writeJSON(w, 200, gi)
+}
+
+func (s *Server) groupDelete(w http.ResponseWriter, r *http.Request) {
+	n, err := s.app.RemoveGroup(r.PathValue("name"), r.URL.Query().Get("untag") == "true")
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	s.events.changed()
+	writeJSON(w, 200, map[string]any{"removed": r.PathValue("name"), "untagged": n})
+}
+
+func (s *Server) groupAddMembers(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		Workstreams []string `json:"workstreams"`
+	}
+	if err := decode(r, &b); err != nil {
+		s.fail(w, err)
+		return
+	}
+	if len(b.Workstreams) == 0 {
+		s.fail(w, badRequest{"workstreams is required"})
+		return
+	}
+	name := r.PathValue("name")
+	for _, q := range b.Workstreams {
+		ws, err := s.app.Resolve(q)
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
+		if err := s.app.Tag(ws, name); err != nil {
+			s.fail(w, err)
+			return
+		}
+	}
+	s.events.changed()
+	g, err := s.app.Group(name)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, 200, g)
+}
+
+func (s *Server) groupRemoveMember(w http.ResponseWriter, r *http.Request) {
+	ws, ok := s.resolve(w, r)
+	if !ok {
+		return
+	}
+	name := r.PathValue("name")
+	if !ws.InGroup(name) {
+		s.fail(w, fmt.Errorf("%w: %s is not in group %q", app.ErrNotFound, ws.ID, name))
+		return
+	}
+	if err := s.app.Untag(ws, name); err != nil {
+		s.fail(w, err)
+		return
+	}
+	s.events.changed()
+	writeJSON(w, 200, map[string]any{"ok": true, "groups": ws.Groups})
 }
 
 // ---------------------------------------------------------------- helpers

@@ -212,6 +212,62 @@ func TestCRUDWithoutSway(t *testing.T) {
 	}
 }
 
+func TestGroups(t *testing.T) {
+	ts, _ := newTestServer(t)
+	want(t, call(t, ts, "POST", "/api/v1/workstreams", map[string]any{"desc": "a", "jira": "G-1", "groups": []string{"s20"}}), 201)
+	want(t, call(t, ts, "POST", "/api/v1/workstreams", map[string]any{"desc": "b", "jira": "G-2"}), 201)
+	want(t, call(t, ts, "POST", "/api/v1/workstreams", map[string]any{"desc": "c", "groups": []string{"bad/name"}}), 400)
+
+	// a tagged-but-unregistered group exists
+	r := want(t, call(t, ts, "GET", "/api/v1/groups", nil), 200)
+	if len(r.list) != 1 || r.list[0]["name"] != "s20" || r.list[0]["registered"] != false || r.list[0]["count"].(float64) != 1 {
+		t.Fatalf("groups: %s", r.raw)
+	}
+	// register metadata; bad dates rejected
+	want(t, call(t, ts, "PUT", "/api/v1/groups/s20", map[string]any{"kind": "sprint", "start": "2026-09-23", "end": "2026-10-06"}), 200)
+	want(t, call(t, ts, "PUT", "/api/v1/groups/s20", map[string]any{"end": "nope"}), 400)
+	want(t, call(t, ts, "PUT", "/api/v1/groups/bad%2Fname", map[string]any{}), 400)
+	// registered, empty: hidden unless all=true
+	want(t, call(t, ts, "PUT", "/api/v1/groups/s21", map[string]any{"start": "2026-10-07", "end": "2026-10-20"}), 200)
+	if r := want(t, call(t, ts, "GET", "/api/v1/groups", nil), 200); len(r.list) != 1 {
+		t.Fatalf("empty group shown: %s", r.raw)
+	}
+	if r := want(t, call(t, ts, "GET", "/api/v1/groups?all=true", nil), 200); len(r.list) != 2 || r.list[0]["name"] != "s20" || r.list[1]["name"] != "s21" {
+		t.Fatalf("all groups / order: %s", r.raw)
+	}
+	// membership endpoints
+	r = want(t, call(t, ts, "POST", "/api/v1/groups/s21/members", map[string]any{"workstreams": []string{"G-2", "G-1"}}), 200)
+	if r.body["count"].(float64) != 2 {
+		t.Fatalf("add members: %s", r.raw)
+	}
+	want(t, call(t, ts, "POST", "/api/v1/groups/s21/members", map[string]any{"workstreams": []string{"nope"}}), 404)
+	want(t, call(t, ts, "POST", "/api/v1/groups/s21/members", map[string]any{}), 400)
+	want(t, call(t, ts, "DELETE", "/api/v1/groups/s21/members/G-2", nil), 200)
+	want(t, call(t, ts, "DELETE", "/api/v1/groups/s21/members/G-2", nil), 404)
+	if r := want(t, call(t, ts, "GET", "/api/v1/workstreams?group=s21", nil), 200); len(r.list) != 1 || r.list[0]["id"] != "G-1" {
+		t.Fatalf("filter: %s", r.raw)
+	}
+	// PATCH groups replaces tags; other fields untouched
+	r = want(t, call(t, ts, "PATCH", "/api/v1/workstreams/G-1", map[string]any{"groups": []string{"backlog"}}), 200)
+	if g := r.body["workstream"].(map[string]any)["groups"].([]any); len(g) != 1 || g[0] != "backlog" {
+		t.Fatalf("patch groups: %s", r.raw)
+	}
+	if r := want(t, call(t, ts, "GET", "/api/v1/groups/s21", nil), 200); r.body["count"].(float64) != 0 {
+		t.Fatalf("s21 should be empty now: %s", r.raw)
+	}
+	want(t, call(t, ts, "GET", "/api/v1/groups/nope", nil), 404)
+	// delete: registry only, then with untag
+	want(t, call(t, ts, "DELETE", "/api/v1/groups/s21", nil), 200)
+	want(t, call(t, ts, "DELETE", "/api/v1/groups/s21", nil), 404)
+	r = want(t, call(t, ts, "DELETE", "/api/v1/groups/backlog?untag=true", nil), 200)
+	if r.body["untagged"].(float64) != 1 {
+		t.Fatalf("untag: %s", r.raw)
+	}
+	if r := want(t, call(t, ts, "GET", "/api/v1/workstreams/G-1", nil), 200); len(r.body["groups"].([]any)) != 0 {
+		t.Fatalf("G-1 still tagged: %s", r.raw)
+	}
+}
+
 func TestUIAndEvents(t *testing.T) {
 	ts, _ := newTestServer(t)
 	r := want(t, call(t, ts, "GET", "/", nil), 200)
