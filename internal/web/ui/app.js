@@ -4,9 +4,9 @@
 'use strict';
 
 const S = {
-  status: null, items: [], groups: [], config: null, repos: [],
+  status: null, items: [], groups: [], sources: [], config: null, repos: [],
   selected: null, detail: null, todo: null, session: null, cands: null, candsAll: false,
-  filter: '', onlyLive: false, live: false,
+  filter: '', onlyLive: false, onlyMine: localStorage.getItem('jug.mine') === '1', showFinished: localStorage.getItem('jug.finished') === '1', live: false,
   view: localStorage.getItem('jug.view') || 'grouped',
   collapsed: JSON.parse(localStorage.getItem('jug.collapsed') || '{}'),
 };
@@ -73,6 +73,15 @@ function daysLeftText(g) {
   if (g.days_left === 1) return 'ends tomorrow';
   return `${g.days_left}d left`;
 }
+// reportSummary mirrors Report.Summary() in internal/app/sync.go (minus the
+// source name and duration) so the toast and the chip read like `jug sync`.
+function reportSummary(r) {
+  const parts = [];
+  const add = (a, w) => { if (a && a.length) parts.push(`${a.length} ${w}`); };
+  add(r.created, 'created'); add(r.adopted, 'adopted'); add(r.updated, 'updated'); add(r.regrouped, 'regrouped'); add(r.tombstoned, 'tombstoned'); add(r.groups_registered, 'groups registered'); add(r.groups_updated, 'groups updated'); add(r.errors, 'errors');
+  const tail = [`${r.unchanged} unchanged`]; if (r.finished && r.finished.length) tail.push(`${r.finished.length} finished skipped`); if (r.prunable && r.prunable.length) tail.push(`${r.prunable.length} prunable`);
+  return (parts.length ? parts.join(', ') : 'nothing to do') + ` (${tail.join(', ')})`;
+}
 function stateGlyph(st) { return st === 'displayed' ? '●' : st === 'parked' ? '◐' : '○'; }
 function refBadge(r) {
   const label = r.key || (r.type === 'url' ? new URL(r.url).host : r.type);
@@ -86,8 +95,8 @@ function scheduleRefresh(ms = 120) { clearTimeout(refreshTimer); refreshTimer = 
 
 async function refreshAll() {
   try {
-    const [status, items, groups] = await Promise.all([GET('/api/v1/status'), GET('/api/v1/workstreams'), GET('/api/v1/groups?all=true')]);
-    S.status = status; S.items = items; S.groups = groups;
+    const [status, items, groups, sources] = await Promise.all([GET('/api/v1/status'), GET('/api/v1/workstreams'), GET('/api/v1/groups?all=true'), GET('/api/v1/sources')]);
+    S.status = status; S.items = items; S.groups = groups; S.sources = sources;
     if (S.selected && !items.find(i => i.name === S.selected)) { S.selected = null; S.detail = null; }
     render();
     if (S.selected) await loadDetail(S.selected, { keepTodo: true });
@@ -127,16 +136,22 @@ function rowHTML(it) {
   const branch = g ? (g.branch || ('@' + g.head)) + (g.dirty ? '*' : '') : '';
   const sess = it.opencode_session ? it.opencode_session.slice(-8) : '';
   const groups = S.view === 'flat' ? (it.groups || []).map(x => h`<span class="badge group">${x}</span>`).join('') : '';
-  return h`<tr data-name="${it.name}" class="${it.state} ${S.selected === it.name ? 'selected' : ''}">
-    <td class="state" title="${it.state}">${stateGlyph(it.state)}</td>
+  const jiraTitle = ((it.refs || []).find(r => r.type === 'jira' && r.title) || {}).title || '';
+  // "no code" matters for something you work on by hand; a synced ticket you
+  // have not started simply has none yet
+  const nocode = !it.has_code && !it.source ? raw(' <span class="badge nocode" title="no code dir: terminals start in the workstream dir">no code</span>') : '';
+  const finishedWhy = it.finished ? (it.completed ? 'completed by you ' + ago(it.completed) : 'ticket closed') + (it.state === 'none' ? '' : ' — still has windows; close them and it leaves the default view') : '';
+  return h`<tr data-name="${it.name}" class="${it.state} ${S.selected === it.name ? 'selected' : ''} ${it.finished ? 'done' : ''}">
+    <td class="state" title="${it.state}${finishedWhy ? ' · ' + finishedWhy : ''}">${it.finished ? '✓' : stateGlyph(it.state)}</td>
     <td class="id">${it.id}</td>
     <td><span class="badge cat-${it.category}">${it.category}</span>${raw(groups)}</td>
-    <td class="desc">${it.desc}${it.has_code ? '' : raw(' <span class="badge nocode" title="no code dir: terminals start in the workstream dir">no code</span>')}</td>
+    <td class="desc" title="${jiraTitle}">${it.desc}${nocode}</td>
+    <td class="owner">${it.owner ? raw(h`<span class="badge owner" title="assigned to ${it.owner}">${it.owner}</span>`) : ''}</td>
     <td>${raw((it.refs || []).map(refBadge).join(''))}</td>
     <td class="mono">${it.todos_open || ''}</td>
     <td class="mono" title="${g ? short(it.code_path) : ''}">${branch}${g && g.dirty ? raw(' <span class="badge dirty" title="uncommitted changes">dirty</span>') : ''}</td>
     <td class="mono dim" title="${it.opencode_session || ''}">${sess}</td>
-    <td class="actions sm">${it.state === 'displayed' ? raw('<button data-act="focus" title="focus opencode">focus</button>') : raw('<button data-act="show" class="primary" title="show in the slot">show</button>')}</td>
+    <td class="actions sm">${it.state === 'displayed' ? raw('<button data-act="focus" title="focus opencode">focus</button>') : raw('<button data-act="show" class="primary" title="show in the slot">show</button>')}${it.completed ? raw('<button data-act="reopen" class="icon" title="reopen (clear your completion mark)">↺</button>') : it.finished ? '' : raw('<button data-act="complete" class="icon" title="complete: mark done in juggler (the ticket is not touched)">✓</button>')}</td>
   </tr>`;
 }
 
@@ -144,9 +159,11 @@ function groupRowHTML(g, n, collapsed) {
   const key = g ? g.name : NOGROUP;
   const meta = g ? [dateRange(g), daysLeftText(g)].filter(Boolean).join(' · ') : 'workstreams in no group';
   const cls = ['group-row', collapsed ? 'collapsed' : '', g && g.current ? 'current' : '', g && g.days_left !== undefined && g.days_left !== null && g.days_left < 0 ? 'past' : ''].join(' ');
-  return h`<tr class="${cls}" data-group="${key}"><td colspan="9"><div>
+  return h`<tr class="${cls}" data-group="${key}"><td colspan="10"><div>
     <span class="chev">▾</span><span class="gname">${g ? g.name : 'no group'}</span>
+    ${g && g.url ? raw(h`<a class="glink" href="${g.url}" target="_blank" rel="noopener" title="${g.url}">↗</a>`) : ''}
     ${g && g.kind ? raw(h`<span class="badge kind">${g.kind}</span>`) : ''}
+    ${g && g.source ? raw(h`<span class="badge src" title="maintained by source ${g.source}">${g.source}</span>`) : ''}
     ${g && g.current ? raw('<span class="badge current">current</span>') : ''}
     ${g && !g.current && g.days_left !== undefined && g.days_left !== null && g.days_left < 0 ? raw('<span class="badge ended">ended</span>') : ''}
     <span class="gmeta">${meta}</span>${g && g.desc ? raw(h`<span class="gmeta">— ${g.desc}</span>`) : ''}
@@ -155,17 +172,41 @@ function groupRowHTML(g, n, collapsed) {
   </div></td></tr>`;
 }
 
+// A filter toggle that would change nothing is greyed out and says why, so
+// it cannot be mistaken for a broken one: "mine only" needs teammates' rows
+// (an owner), "show finished" needs finished rows without windows (a
+// finished workstream that still has windows is always listed, so that its
+// windows can be closed from here).
+function renderToggles() {
+  const owned = S.items.filter(i => i.owner).length;
+  const mine = $('#only-mine'), mineLabel = mine.closest('label');
+  mine.disabled = owned === 0;
+  mineLabel.classList.toggle('off', owned === 0);
+  mineLabel.title = owned ? `hide the ${owned} teammates' ticket(s) (those with an owner)` : 'nothing to hide: no teammates\' tickets are loaded (the source pulls only yours — set assignee = "any" to pull the team\'s sprint)';
+  const hideable = S.items.filter(i => i.finished && i.state === 'none').length;
+  const fin = $('#show-finished'), finLabel = fin.closest('label');
+  fin.disabled = hideable === 0;
+  finLabel.classList.toggle('off', hideable === 0);
+  $('#show-finished-n').textContent = hideable ? ` (${hideable})` : '';
+  finLabel.title = hideable ? `${hideable} finished workstream(s) are hidden from this view (ticket closed, or completed by you)` : 'nothing to show: every finished workstream still has windows, so it is already listed (with a ✓) — close its windows and it drops out of this view';
+}
+
 function render() {
   renderStatus();
   const q = S.filter.trim().toLowerCase();
+  let hiddenFinished = 0;
   const match = (it) => {
     if (S.onlyLive && it.state === 'none') return false;
+    if (S.onlyMine && it.owner) return false;
+    // finished (ticket closed, or completed by you) is hidden unless it still has windows
+    if (!S.showFinished && it.finished && it.state === 'none') { hiddenFinished++; return false; }
     if (!q) return true;
-    const hay = [it.id, it.desc, it.category, it.name, it.git && it.git.branch, ...(it.groups || []), ...(it.refs || []).map(r => r.key + ' ' + r.status + ' ' + r.title)].join(' ').toLowerCase();
+    const hay = [it.id, it.desc, it.category, it.name, it.owner, it.source, it.git && it.git.branch, ...(it.groups || []), ...(it.refs || []).map(r => r.key + ' ' + r.status + ' ' + r.title)].join(' ').toLowerCase();
     return q.split(/\s+/).every(t => hay.includes(t));
   };
   const order = { displayed: 0, parked: 1, none: 2 };
-  const sortRows = (rows) => rows.sort((a, b) => (order[a.state] - order[b.state]) || (b.shown || '').localeCompare(a.shown || '') || (b.created || '').localeCompare(a.created || ''));
+  // live first; then yours before teammates'; open before finished; newest first
+  const sortRows = (rows) => rows.sort((a, b) => (order[a.state] - order[b.state]) || (b.shown || '').localeCompare(a.shown || '') || ((a.owner ? 1 : 0) - (b.owner ? 1 : 0)) || ((a.finished ? 1 : 0) - (b.finished ? 1 : 0)) || (b.created || '').localeCompare(a.created || ''));
   const rows = sortRows(S.items.filter(match));
   const tb = $('#list tbody');
   if (S.view === 'flat') {
@@ -176,7 +217,8 @@ function render() {
     for (const g of S.groups) {
       const members = (g.members || []).map(n => byName[n]).filter(Boolean);
       if (!members.length) continue; // empty (or fully filtered out) groups are not shown
-      const collapsed = !!S.collapsed[g.name];
+      const ended = g.days_left !== undefined && g.days_left !== null && g.days_left < 0;
+      const collapsed = S.collapsed[g.name] === undefined ? ended : !!S.collapsed[g.name];
       html += groupRowHTML(g, members.length, collapsed);
       if (!collapsed) html += sortRows(members).map(rowHTML).join('');
     }
@@ -188,7 +230,8 @@ function render() {
     }
     tb.innerHTML = html;
   }
-  $('#count').textContent = `${rows.length}/${S.items.length}`;
+  $('#count').textContent = `${rows.length}/${S.items.length}` + (hiddenFinished ? ` · ${hiddenFinished} finished hidden` : '');
+  renderToggles();
   $('#btn-view').textContent = S.view;
   $('#empty').classList.toggle('hidden', S.items.length > 0);
   $('#list').classList.toggle('hidden', S.items.length === 0);
@@ -206,6 +249,14 @@ function renderStatus() {
   const parked = S.items.filter(i => i.state === 'parked').length;
   if (parked) chips.push(h`<span class="chip">lot: ${parked} parked</span>`);
   for (const g of S.groups.filter(g => g.current)) chips.push(h`<span class="chip current" title="${g.desc || g.kind || ''}">${g.kind || 'group'}: <b>${g.name}</b> · ${daysLeftText(g)}</span>`);
+  for (const src of S.sources) {
+    const bad = src.error || src.last_error;
+    const when = src.running ? 'syncing…' : src.last_run ? ago(src.last_run) : 'never';
+    const next = src.next_run && !src.running ? ` · next ${new Date(src.next_run).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}` : '';
+    const prunable = src.last_report && src.last_report.prunable && src.last_report.prunable.length;
+    const tip = (src.describe || '') + (bad ? '\n' + bad : '') + (src.last_report ? '\nlast: ' + reportSummary(src.last_report) : '') + (prunable ? `\n${prunable} untouched leftover(s) — jug source prune ${src.name}` : '') + '\nclick to sync now';
+    chips.push(h`<button class="chip sync ${bad ? 'err' : ''} ${src.running ? 'busy' : ''}" data-sync="${src.name}" title="${tip}">⟳ ${src.name}: ${when}${next}</button>`);
+  }
   if (st.focused_workspace) chips.push(h`<span class="chip" title="focused workspace">on ${st.focused_workspace}</span>`);
   el.innerHTML = chips.join('');
   $('#btn-park').disabled = !st.displayed;
@@ -227,8 +278,8 @@ function renderDetail() {
     <div class="d-head"><h2>${d.id}</h2><span class="desc">${d.desc}</span>
       <span class="badge cat-${d.category}">${d.category}</span>
       ${raw((d.groups || []).map(x => h`<span class="badge group">${x}</span>`).join(''))}
-      <span class="badge ${d.state}">${stateGlyph(d.state)} ${d.state}${d.shown ? ' · ' + ago(d.shown) : ''}</span></div>
-    <div class="d-sub">${short(d.dir)}</div>
+      <span class="badge ${d.state}">${stateGlyph(d.state)} ${d.state}${d.shown ? ' · ' + ago(d.shown) : ''}</span>${d.finished ? raw(h`<span class="badge done" title="${d.completed ? 'completed by you ' + ago(d.completed) : 'the ticket is closed'}">✓ ${d.completed ? 'completed' : 'ticket closed'}</span>`) : ''}</div>
+    <div class="d-sub">${short(d.dir)}${d.source ? raw(h` · <span class="badge src" title="created/maintained by source ${d.source}: ticket status, title and sprint tags are refreshed by it">source: ${d.source}</span>`) : ''}${d.owner ? raw(h` · <span class="badge owner">assigned to ${d.owner}</span>`) : ''}</div>
     <div class="d-actions sm">
       ${d.state === 'displayed' ? raw('<button data-act="focus">focus opencode</button><button data-act="park">park</button>') : raw('<button data-act="show" class="primary">show</button>')}
       <button data-act="term" title="terminal in the right stack">term</button>
@@ -238,6 +289,7 @@ function renderDetail() {
       ${pr ? raw('<button data-act="open-pr">open pr</button>') : ''}
       <button data-act="dictate" title="toggle dictation notes">dictate</button>
       ${live ? raw('<button data-act="close" title="kill its windows; files are kept">close windows</button>') : ''}
+      ${d.completed ? raw('<button data-act="reopen" title="clear your completion mark">reopen</button>') : d.finished ? '' : raw('<button data-act="complete" title="mark done in juggler; the ticket is not touched. Hidden from the picker and the default view">✓ complete</button>')}
     </div>
 
     <fieldset><legend>edit</legend>
@@ -246,7 +298,7 @@ function renderDetail() {
         <label>id</label><input name="id" value="${d.id}">
         <label>description</label><input name="desc" value="${d.desc}">
         <label>jira key</label><input name="jira" value="${jira ? jira.key : ''}" placeholder="attach a ticket (sets id + work unless given)">
-        <span></span><div class="row"><button class="primary">save</button><span class="muted small">changing these renames the directory; windows are closed and reopened</span></div>
+        <span></span><div class="row"><button class="primary">save</button><span class="muted small">changing these renames the directory; windows are closed and reopened${d.source ? '; the source keeps the ticket ref and sprint tags, the rest is yours' : ''}</span></div>
       </form>
     </fieldset>
 
@@ -367,6 +419,8 @@ async function act(name, what, el) {
       case 'unpin': await DEL(p + '/session'); delete sessionCache[name]; toast('unpinned', 'ok'); break;
       case 'relaunch': await POST(p + '/session/relaunch'); toast('opencode relaunched', 'ok'); break;
       case 'sess-refresh': await loadSession(name, true); return;
+      case 'complete': await POST(p + '/complete'); toast(`${name}: completed`, 'ok'); break;
+      case 'reopen': await POST(p + '/reopen'); toast(`${name}: reopened`, 'ok'); break;
       case 'plan': { const plan = await GET(p + '/plan'); showPlan(plan); return; }
     }
     scheduleRefresh(50);
@@ -453,6 +507,8 @@ function groupEditRow(g) {
     <td><input type="date" name="start" value="${g.start || ''}"></td>
     <td><input type="date" name="end" value="${g.end || ''}"></td>
     <td><input class="gdesc" name="desc" value="${g.desc || ''}" placeholder="description"></td>
+    <td><input class="gurl" name="url" type="url" value="${g.url || ''}" placeholder="https://… (external reference)"></td>
+    <td class="mono muted" title="${isNew ? '' : g.source ? 'maintained by source ' + g.source : 'made by hand'}">${isNew ? '' : (g.source || '')}</td>
     <td class="mono muted" title="members">${isNew ? '' : g.count}</td>
     <td class="actions sm">${isNew ? raw('<button class="primary" data-gact="create">create</button>') : raw(h`<button class="primary" data-gact="save">save</button><button class="danger icon" data-gact="delete" title="forget this group's metadata${g.count ? ' (members keep the tag unless you confirm untagging)' : ''}">×</button>`)}</td>
   </tr>`;
@@ -460,8 +516,8 @@ function groupEditRow(g) {
 
 function openGroups(focusName) {
   openModal('groups', `
-    <p class="hint" style="margin:0 0 10px">A group is any bucket — a sprint, a project, a date range. Membership is a tag on each workstream (tick groups in a workstream's detail pane); this is the metadata: kind, dates (groups are ordered by end date), description. Groups without members are hidden from the list but kept here.</p>
-    <table class="groups"><thead><tr><th>name</th><th>kind</th><th>start</th><th>end</th><th>description</th><th>#</th><th></th></tr></thead>
+    <p class="hint" style="margin:0 0 10px">A group is any bucket — a sprint, a project, a date range. Membership is a tag on each workstream (tick groups in a workstream's detail pane); this is the metadata: kind, dates (groups are ordered by end date), description, link. Groups without members are hidden from the list but kept here. Groups with a source are rewritten by it on every sync — edits here last until then.</p>
+    <table class="groups"><thead><tr><th>name</th><th>kind</th><th>start</th><th>end</th><th>description</th><th>link</th><th>source</th><th>#</th><th></th></tr></thead>
     <tbody>${S.groups.map(g => groupEditRow(g)).join('')}${groupEditRow(null)}</tbody></table>
     <datalist id="kinds"><option value="sprint"><option value="project"><option value="bucket"><option value="dates"></datalist>
     <div class="modal-foot"><button id="groups-close">close</button></div>`, true);
@@ -472,7 +528,7 @@ function openGroups(focusName) {
 async function groupAction(act, tr) {
   const name = tr.dataset.gname || (tr.querySelector('input[name=name]') || {}).value;
   const body = {};
-  for (const k of ['kind', 'start', 'end', 'desc']) body[k] = tr.querySelector(`input[name=${k}]`).value.trim();
+  for (const k of ['kind', 'start', 'end', 'desc', 'url']) body[k] = tr.querySelector(`input[name=${k}]`).value.trim();
   if (act === 'create' || act === 'save') {
     if (!name || !name.trim()) throw new Error('a group name is required');
     await PUT(`/api/v1/groups/${encodeURIComponent(name.trim())}`, body);
@@ -492,6 +548,17 @@ async function groupAction(act, tr) {
 // ------------------------------------------------------------------ wiring
 
 document.addEventListener('click', async (e) => {
+  const sbtn = e.target.closest('button[data-sync]');
+  if (sbtn) {
+    const name = sbtn.dataset.sync;
+    await busy(sbtn, async () => {
+      sbtn.classList.add('busy'); sbtn.textContent = `⟳ ${name}: syncing…`;
+      const r = await api('POST', `/api/v1/sources/${encodeURIComponent(name)}/sync`, {});
+      (r.reports || []).forEach(rep => toast(`${rep.source}: ${reportSummary(rep)}` + (rep.errors && rep.errors.length ? '\n' + rep.errors.join('\n') : ''), rep.errors && rep.errors.length ? 'err' : 'ok'));
+      scheduleRefresh(50);
+    })();
+    return;
+  }
   const gbtn = e.target.closest('button[data-gact]');
   if (gbtn) {
     e.stopPropagation();
@@ -501,9 +568,9 @@ document.addEventListener('click', async (e) => {
     return;
   }
   const grow = e.target.closest('tr.group-row');
-  if (grow) {
+  if (grow && !e.target.closest('a')) {
     const key = grow.dataset.group;
-    S.collapsed[key] = !S.collapsed[key];
+    S.collapsed[key] = !grow.classList.contains('collapsed');
     localStorage.setItem('jug.collapsed', JSON.stringify(S.collapsed));
     render();
     return;
@@ -575,6 +642,10 @@ $('#modal-close').onclick = closeModal;
 $('#modal').addEventListener('click', (e) => { if (e.target.id === 'modal') closeModal(); });
 $('#filter').addEventListener('input', (e) => { S.filter = e.target.value; render(); });
 $('#only-live').addEventListener('change', (e) => { S.onlyLive = e.target.checked; render(); });
+$('#show-finished').checked = S.showFinished;
+$('#show-finished').addEventListener('change', (e) => { S.showFinished = e.target.checked; localStorage.setItem('jug.finished', S.showFinished ? '1' : '0'); render(); });
+$('#only-mine').checked = S.onlyMine;
+$('#only-mine').addEventListener('change', (e) => { S.onlyMine = e.target.checked; localStorage.setItem('jug.mine', S.onlyMine ? '1' : '0'); render(); });
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') { if (!$('#modal').classList.contains('hidden')) closeModal(); }
   if (e.key === '/' && !/input|textarea|select/i.test(document.activeElement.tagName)) { e.preventDefault(); $('#filter').focus(); }
@@ -588,6 +659,7 @@ function connectEvents() {
   const es = new EventSource('/api/v1/events');
   es.addEventListener('hello', () => { S.live = true; $('#live').className = 'dot on'; });
   es.addEventListener('changed', () => scheduleRefresh());
+  es.addEventListener('synced', () => scheduleRefresh());
   es.addEventListener('tick', () => scheduleRefresh());
   es.onerror = () => { S.live = false; $('#live').className = 'dot err'; };
 }

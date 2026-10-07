@@ -26,11 +26,13 @@
     <div class="toolbar">
       <input id="filter" type="search" placeholder="filter  (id, description, category, group, branch, ref…)   /" autocomplete="off">
       <label class="chk"><input id="only-live" type="checkbox"> live only</label>
+      <label class="chk" title="hide teammates' tickets (those with an owner)"><input id="only-mine" type="checkbox"> mine only</label>
+      <label class="chk" title="finished = the ticket is closed, or you marked it complete; hidden unless it still has windows"><input id="show-finished" type="checkbox"> show finished<span id="show-finished-n"></span></label>
       <span id="count" class="muted"></span>
     </div>
     <table id="list">
       <thead><tr>
-        <th></th><th>id</th><th>category</th><th>description</th><th>refs</th><th>todo</th><th>branch</th><th>session</th><th></th>
+        <th></th><th>id</th><th>category</th><th>description</th><th>owner</th><th>refs</th><th>todo</th><th>branch</th><th>session</th><th></th>
       </tr></thead>
       <tbody></tbody>
     </table>

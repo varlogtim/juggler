@@ -53,6 +53,28 @@ func TestOrderingAndRows(t *testing.T) {
 	}
 }
 
+func TestFinishedHiddenUnlessLive(t *testing.T) {
+	t0 := time.Now()
+	closed := func(id string, live bool) Entry {
+		e := entry(id, "x", false, live, t0, t0)
+		e.W.Refs = []store.Ref{{Type: "jira", Key: id, URL: "https://x/" + id, Closed: true}}
+		return e
+	}
+	completed := entry("C", "x", false, false, t0, t0)
+	completed.W.Completed = t0
+	es := []Entry{entry("A", "open", false, false, t0, t0), closed("B", false), closed("L", true), completed}
+	lines := Lines(es)
+	if len(lines) != 3 { // A, L (live), + new
+		t.Fatalf("lines: %q", lines)
+	}
+	if !strings.HasPrefix(lines[0], "✓ L") || !strings.HasPrefix(lines[1], "○ A") {
+		t.Fatalf("order/glyphs: %q", lines)
+	}
+	if o := Ordered(es); len(o) != 2 {
+		t.Fatalf("ordered: %d", len(o))
+	}
+}
+
 func TestRowShowsRefs(t *testing.T) {
 	e := entry("AISW-1", "x", false, false, time.Time{}, time.Now())
 	e.W.Refs = []store.Ref{

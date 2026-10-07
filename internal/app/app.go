@@ -34,6 +34,9 @@ type App struct {
 	Debug func(format string, args ...any)
 	// DialFunc overrides how sway is reached (tests).
 	DialFunc func() (*sway.Conn, error)
+	// Scheduler is set when this process runs the source scheduler (jug
+	// serve), so statuses can say "running / next run".
+	Scheduler *Scheduler
 
 	mu sync.Mutex
 }
@@ -161,6 +164,35 @@ type CreateOptions struct {
 	Jira     string // ticket key: becomes a jira ref (and the id)
 	PR       string // pull request URL: becomes a pr ref
 	Groups   []string
+}
+
+// Complete marks w done in juggler (your call, independent of the ticket).
+func (a *App) Complete(w *store.Workstream) error {
+	if !w.Completed.IsZero() {
+		return nil
+	}
+	w.Completed = time.Now()
+	return a.Store.Save(w)
+}
+
+// Reopen clears the completion mark.
+func (a *App) Reopen(w *store.Workstream) error {
+	if w.Completed.IsZero() {
+		return nil
+	}
+	w.Completed = time.Time{}
+	return a.Store.Save(w)
+}
+
+// RemoveHook: when a sourced workstream is removed, its key is tombstoned
+// in that source's ledger so the next sync does not bring it back.
+func (a *App) tombstoneIfSourced(w *store.Workstream) {
+	if w.Source == "" {
+		return
+	}
+	if r := identityRef(w); r != nil {
+		_ = a.Tombstone(w.Source, r.Key)
+	}
 }
 
 // CategoryFor applies the one rule: a workstream with a ticket is "work"

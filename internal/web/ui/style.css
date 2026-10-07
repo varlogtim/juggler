@@ -47,6 +47,7 @@ input[type=text], input[type=search], input[type=url], select, textarea { backgr
 input:focus, select:focus, textarea:focus { outline: none; border-color: var(--brblue); }
 textarea { font-family: var(--mono); font-size: 13px; width: 100%; min-height: 220px; resize: vertical; tab-size: 2; }
 label.chk { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--fg1); white-space: nowrap; }
+label.chk.off { opacity: .45; cursor: help; }  /* nothing to act on; the title says why */
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .grid { display: grid; grid-template-columns: max-content 1fr; gap: 6px 12px; align-items: center; }
 .grid > label { color: var(--muted); font-size: 13px; text-align: right; }
@@ -166,3 +167,24 @@ table.groups input.gdesc { width: 100%; min-width: 160px; }
 table.groups input.gname { width: 240px; font-family: var(--mono); }
 table.groups td:first-child .mono { font-size: 12.5px; }
 .hint { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
+
+/* sources / sync */
+.badge.src { border-color: #5f5f8f; color: #b0b0e0; }
+.badge.owner { border-color: var(--bg3); color: var(--fg1); white-space: nowrap; }
+td.owner { white-space: nowrap; font-size: 12.5px; }
+button.chip { cursor: pointer; }
+button.chip.sync { color: var(--fg1); }
+button.chip.sync:hover { background: var(--bg3); }
+button.chip.sync.busy { color: #ffd75f; border-color: var(--yellow); }
+button.chip.sync.err { border-color: var(--brred); color: #ff8787; }
+.glink { color: var(--brblue); font-size: 13px; text-decoration: none; margin-right: 4px; }
+.glink:hover { text-decoration: none; color: #fff; }
+table.groups input.gurl { width: 100%; min-width: 180px; font-family: var(--mono); font-size: 12px; }
+
+/* finished tickets */
+tbody tr.done td { opacity: .55; }
+tbody tr.done:hover td, tbody tr.done.selected td { opacity: .9; }
+tbody tr.done td.state { color: var(--brgreen); }
+.badge.done { border-color: var(--brgreen); color: #c0e07a; }
+td.desc { max-width: 420px; }
+td.desc, td.desc * { overflow-wrap: anywhere; }

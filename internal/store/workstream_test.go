@@ -1,6 +1,7 @@
 package store
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -105,5 +106,36 @@ func TestRefLookupAndCodeDir(t *testing.T) {
 	}
 	if w.ResolvedCodeDir() != "/x" {
 		t.Errorf("empty code dir should be the workstream dir, got %q", w.ResolvedCodeDir())
+	}
+}
+
+func TestFinishedAndUntouched(t *testing.T) {
+	s := newStore(t)
+	w, _ := s.Resolve("AISW-53270")
+	if w.Finished() || !w.Untouched() {
+		t.Fatalf("fresh: finished=%v untouched=%v", w.Finished(), w.Untouched())
+	}
+	w.Refs = []Ref{{Type: "pr", Key: "o/r#1", URL: "https://x/pull/1", Closed: true}}
+	if w.Finished() {
+		t.Fatal("a closed PR must not finish a workstream")
+	}
+	w.Refs = append(w.Refs, Ref{Type: "jira", Key: "AISW-53270", URL: "https://x/browse/AISW-53270", Closed: true})
+	if !w.Finished() || !w.TicketClosed() || w.IdentityRef().Key != "AISW-53270" {
+		t.Fatal("closed ticket should finish")
+	}
+	w.Refs[1].Closed = false
+	w.Completed = time.Now()
+	if !w.Finished() || w.TicketClosed() || w.Untouched() {
+		t.Fatal("completed should finish and count as touched")
+	}
+	w.Completed = time.Time{}
+	os.WriteFile(w.TodoPath(), []byte("- [ ] mine\n"), 0o644)
+	if w.Untouched() {
+		t.Fatal("edited TODO.md should count as touched")
+	}
+	os.WriteFile(w.TodoPath(), []byte(DefaultTodo(w)), 0o644)
+	os.WriteFile(filepath.Join(w.NotesDir(), "a.md"), []byte("x"), 0o644)
+	if w.Untouched() {
+		t.Fatal("a note should count as touched")
 	}
 }

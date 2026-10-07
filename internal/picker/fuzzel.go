@@ -26,9 +26,25 @@ type Entry struct {
 // NewMarker is the sentinel row that creates a workstream.
 const NewMarker = "+ new workstream…"
 
+// Visible drops finished workstreams that have no windows: nothing to go
+// to there. (A finished one that still has windows stays, so you can reach
+// them.)
+func Visible(entries []Entry) []Entry {
+	out := entries[:0:0]
+	for _, e := range entries {
+		if e.W.Finished() && !e.Live && !e.Displayed {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
 // Lines renders entries as aligned columns. Displayed first, then live
-// (most recently shown first), then the rest (newest first).
+// (most recently shown first), then the rest (yours, then teammates';
+// newest first).
 func Lines(entries []Entry) []string {
+	entries = Visible(entries)
 	// stable partition
 	var displayed, live, rest []Entry
 	for _, e := range entries {
@@ -42,14 +58,14 @@ func Lines(entries []Entry) []string {
 		}
 	}
 	sortBy(live, func(a, b Entry) bool { return a.Shown.After(b.Shown) })
-	sortBy(rest, func(a, b Entry) bool { return a.W.Created.After(b.W.Created) })
+	sortBy(rest, restLess)
 	ordered := append(append(displayed, live...), rest...)
 
 	rows := make([][]string, 0, len(ordered)+1)
 	for _, e := range ordered {
 		rows = append(rows, row(e))
 	}
-	widths := make([]int, 7)
+	widths := make([]int, 8)
 	for _, r := range rows {
 		for i, c := range r {
 			if n := utf8.RuneCountInString(c); n > widths[i] {
@@ -79,6 +95,9 @@ func row(e Entry) []string {
 	case e.Live:
 		glyph = "◐"
 	}
+	if e.W.Finished() {
+		glyph = "✓" // only ever seen on a finished workstream that still has windows
+	}
 	w := e.W
 	jira, pr := "", ""
 	if r := w.Ref("jira"); r != nil {
@@ -97,7 +116,15 @@ func row(e Entry) []string {
 	if w.CodeDir == "" {
 		todo = strings.TrimSpace(todo + " no-code")
 	}
-	return []string{glyph + " " + w.ID, w.Desc, jira, pr, todo, w.Category, strings.Join(w.Groups, ",")}
+	desc := w.Desc
+	if r := []rune(desc); len(r) > 60 {
+		desc = string(r[:59]) + "…"
+	}
+	owner := ""
+	if w.Owner != "" {
+		owner = "@" + w.Owner
+	}
+	return []string{glyph + " " + w.ID, desc, jira, pr, todo, w.Category, owner, strings.Join(w.Groups, ",")}
 }
 
 func prLabel(r *store.Ref) string {
@@ -116,6 +143,7 @@ func prLabel(r *store.Ref) string {
 // Ordered returns the entries in the same order Lines renders them, so the
 // selected index maps back to an entry.
 func Ordered(entries []Entry) []Entry {
+	entries = Visible(entries)
 	var displayed, live, rest []Entry
 	for _, e := range entries {
 		switch {
@@ -128,8 +156,17 @@ func Ordered(entries []Entry) []Entry {
 		}
 	}
 	sortBy(live, func(a, b Entry) bool { return a.Shown.After(b.Shown) })
-	sortBy(rest, func(a, b Entry) bool { return a.W.Created.After(b.W.Created) })
+	sortBy(rest, restLess)
 	return append(append(displayed, live...), rest...)
+}
+
+// restLess orders workstreams that have no windows: yours before
+// teammates' (those with an owner), then newest first.
+func restLess(a, b Entry) bool {
+	if (a.W.Owner == "") != (b.W.Owner == "") {
+		return a.W.Owner == ""
+	}
+	return a.W.Created.After(b.W.Created)
 }
 
 func sortBy(es []Entry, less func(a, b Entry) bool) {

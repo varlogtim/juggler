@@ -64,6 +64,15 @@ func (s *Server) ListenAndServe(addr string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go s.events.watch(ctx, s.app)
+	sched := app.NewScheduler(s.app, s.Log)
+	sched.OnReport = func(rep *app.Report, err error) {
+		if err == nil && rep != nil && (len(rep.Created)+len(rep.Adopted)+len(rep.Updated)+len(rep.Regrouped)+len(rep.GroupsRegistered)+len(rep.GroupsUpdated)) > 0 {
+			s.events.publish("changed", "sync")
+			return
+		}
+		s.events.publish("synced", rep.Source) // status only (last run moved)
+	}
+	go sched.Run(ctx)
 	srv := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	return srv.Serve(ln)
 }
@@ -92,6 +101,13 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/v1/slot/park-others", s.slotParkOthers)
 	m.HandleFunc("POST /api/v1/lot", s.lot)
 
+	m.HandleFunc("GET /api/v1/sources", s.sources)
+	m.HandleFunc("GET /api/v1/sources/{name}", s.sourceGet)
+	m.HandleFunc("POST /api/v1/sources/{name}/sync", s.sourceSync)
+	m.HandleFunc("POST /api/v1/sources/{name}/forgive", s.sourceForgive)
+	m.HandleFunc("POST /api/v1/sources/{name}/prune", s.sourcePrune)
+	m.HandleFunc("POST /api/v1/sync", s.syncAll)
+
 	m.HandleFunc("GET /api/v1/groups", s.groups)
 	m.HandleFunc("GET /api/v1/groups/{name}", s.groupGet)
 	m.HandleFunc("PUT /api/v1/groups/{name}", s.groupPut)
@@ -114,6 +130,8 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/v1/workstreams/{ws}/repo", s.repoAdd)
 	m.HandleFunc("POST /api/v1/workstreams/{ws}/seed", s.seed)
 
+	m.HandleFunc("POST /api/v1/workstreams/{ws}/complete", s.complete)
+	m.HandleFunc("POST /api/v1/workstreams/{ws}/reopen", s.reopen)
 	m.HandleFunc("POST /api/v1/workstreams/{ws}/show", s.show)
 	m.HandleFunc("POST /api/v1/workstreams/{ws}/close", s.closeWS)
 	m.HandleFunc("POST /api/v1/workstreams/{ws}/open", s.open)
@@ -624,6 +642,34 @@ func (s *Server) seed(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"seeded": written})
 }
 
+// complete and reopen are POST /workstreams/{ws}/complete|reopen: the
+// juggler-only finished mark. Store-only, so they work without sway.
+func (s *Server) complete(w http.ResponseWriter, r *http.Request) {
+	ws, ok := s.resolve(w, r)
+	if !ok {
+		return
+	}
+	if err := s.app.Complete(ws); err != nil {
+		s.fail(w, err)
+		return
+	}
+	s.events.changed()
+	writeJSON(w, 200, s.app.Info(ws))
+}
+
+func (s *Server) reopen(w http.ResponseWriter, r *http.Request) {
+	ws, ok := s.resolve(w, r)
+	if !ok {
+		return
+	}
+	if err := s.app.Reopen(ws); err != nil {
+		s.fail(w, err)
+		return
+	}
+	s.events.changed()
+	writeJSON(w, 200, s.app.Info(ws))
+}
+
 // ---------------------------------------------------------------- windows
 
 func (s *Server) show(w http.ResponseWriter, r *http.Request) {
@@ -869,12 +915,13 @@ func (s *Server) groupPut(w http.ResponseWriter, r *http.Request) {
 		Desc  *string `json:"desc"`
 		Start *string `json:"start"`
 		End   *string `json:"end"`
+		URL   *string `json:"url"`
 	}
 	if err := decode(r, &b); err != nil {
 		s.fail(w, err)
 		return
 	}
-	g, err := s.app.SetGroup(r.PathValue("name"), app.GroupPatch{Kind: b.Kind, Desc: b.Desc, Start: b.Start, End: b.End})
+	g, err := s.app.SetGroup(r.PathValue("name"), app.GroupPatch{Kind: b.Kind, Desc: b.Desc, Start: b.Start, End: b.End, URL: b.URL})
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -943,6 +990,130 @@ func (s *Server) groupRemoveMember(w http.ResponseWriter, r *http.Request) {
 	}
 	s.events.changed()
 	writeJSON(w, 200, map[string]any{"ok": true, "groups": ws.Groups})
+}
+
+// ---------------------------------------------------------------- sources / sync
+
+// sources is GET /sources: every configured source with its ledger state
+// (an empty list, never null).
+func (s *Server) sources(w http.ResponseWriter, r *http.Request) {
+	sts := s.app.SourceStatuses()
+	if sts == nil {
+		sts = []app.SourceStatus{}
+	}
+	writeJSON(w, 200, sts)
+}
+
+// sourceGet is GET /sources/{name}; 404 for a name not in the config.
+func (s *Server) sourceGet(w http.ResponseWriter, r *http.Request) {
+	for _, st := range s.app.SourceStatuses() {
+		if st.Name == r.PathValue("name") {
+			writeJSON(w, 200, st)
+			return
+		}
+	}
+	writeJSON(w, http.StatusNotFound, apiError{Error: "no source " + r.PathValue("name"), Code: "not_found"})
+}
+
+// sourceSync runs one source now (synchronously; a few seconds).
+func (s *Server) sourceSync(w http.ResponseWriter, r *http.Request) {
+	src, err := s.app.SourceByName(r.PathValue("name"))
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	dry := r.URL.Query().Get("dry_run") == "true"
+	ctx, cancel := context.WithTimeout(r.Context(), 4*time.Minute)
+	defer cancel()
+	rep, err := s.app.Sync(ctx, src, app.SyncOptions{DryRun: dry})
+	reps := []*app.Report{}
+	if rep != nil {
+		reps = append(reps, rep)
+	}
+	if !dry {
+		s.events.publish("changed", "sync")
+	}
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"reports": reps, "error": err.Error(), "code": "sync_failed"})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"reports": reps})
+}
+
+// syncAll is POST /sync: every source in turn, under one deadline. A pull
+// failure makes the whole response 502 sync_failed but still carries every
+// report, so the caller sees what did run.
+func (s *Server) syncAll(w http.ResponseWriter, r *http.Request) {
+	dry := r.URL.Query().Get("dry_run") == "true"
+	ctx, cancel := context.WithTimeout(r.Context(), 4*time.Minute)
+	defer cancel()
+	reps, err := s.app.SyncAll(ctx, app.SyncOptions{DryRun: dry})
+	if reps == nil {
+		reps = []*app.Report{}
+	}
+	if !dry {
+		s.events.publish("changed", "sync")
+	}
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"reports": reps, "error": err.Error(), "code": "sync_failed"})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"reports": reps})
+}
+
+// sourcePrune removes the source's untouched leftovers (?dry_run=true lists).
+func (s *Server) sourcePrune(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.app.SourceByName(r.PathValue("name")); err != nil {
+		s.fail(w, err)
+		return
+	}
+	dry := r.URL.Query().Get("dry_run") == "true"
+	var removed, skipped []string
+	err := s.app.WithEngine(func(e *layout.Engine) (err error) {
+		removed, skipped, err = s.app.Prune(e, r.PathValue("name"), dry)
+		return
+	})
+	var se *app.SwayError
+	if errors.As(err, &se) {
+		removed, skipped, err = s.app.Prune(nil, r.PathValue("name"), dry)
+	}
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	if removed == nil {
+		removed = []string{}
+	}
+	if skipped == nil {
+		skipped = []string{}
+	}
+	if !dry && len(removed) > 0 {
+		s.events.changed()
+	}
+	writeJSON(w, 200, map[string]any{"removed": removed, "skipped": skipped, "dry_run": dry})
+}
+
+// sourceForgive is POST /sources/{name}/forgive: drop tombstones so the
+// next sync may recreate those keys.
+func (s *Server) sourceForgive(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		Keys []string `json:"keys"`
+	}
+	if err := decode(r, &b); err != nil {
+		s.fail(w, err)
+		return
+	}
+	if len(b.Keys) == 0 {
+		s.fail(w, badRequest{"keys is required"})
+		return
+	}
+	for _, k := range b.Keys {
+		if err := s.app.Forgive(r.PathValue("name"), k); err != nil {
+			s.fail(w, err)
+			return
+		}
+	}
+	writeJSON(w, 200, map[string]any{"forgiven": b.Keys})
 }
 
 // ---------------------------------------------------------------- helpers
