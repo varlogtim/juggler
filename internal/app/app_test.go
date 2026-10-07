@@ -53,7 +53,7 @@ func TestCreateRules(t *testing.T) {
 		t.Fatal("duplicate accepted")
 	}
 	for _, in := range []WorkstreamInfo{a.InfoOf(w, nil, nil)} {
-		if in.State != "none" || in.HasCode || in.Git != nil || in.TodosOpen != 5 {
+		if in.State != "none" || in.HasCode || in.Git != nil || in.TodosOpen != 0 {
 			t.Fatalf("info: %+v", in)
 		}
 	}

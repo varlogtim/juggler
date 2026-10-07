@@ -150,8 +150,8 @@ func TestCRUDWithoutSway(t *testing.T) {
 
 	// todo
 	r = want(t, call(t, ts, "GET", "/api/v1/workstreams/ABC-12/todo", nil), 200)
-	if r.body["open"].(float64) != 5 {
-		t.Fatalf("default todo should have 5 open items: %v", r.body["open"])
+	if r.body["open"].(float64) != 0 || !strings.HasPrefix(r.body["text"].(string), "# ABC-12 — ") {
+		t.Fatalf("default todo should be a heading with no items: %v", r.body)
 	}
 	want(t, call(t, ts, "PUT", "/api/v1/workstreams/ABC-12/todo", map[string]any{"text": "- [x] done\n- [ ] one left\n"}), 200)
 	r = want(t, call(t, ts, "GET", "/api/v1/workstreams/ABC-12/todo", nil), 200)

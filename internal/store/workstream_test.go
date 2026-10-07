@@ -54,8 +54,11 @@ func TestSaveCreatesLayout(t *testing.T) {
 	if filepath.Base(w.Dir) != "work_AISW-53270_disagg-toggle-requires-pause" {
 		t.Errorf("dir %q", w.Dir)
 	}
-	if n := w.OpenTodos(); n != 5 {
-		t.Errorf("default TODO.md has %d open items, want 5", n)
+	if n := w.OpenTodos(); n != 0 {
+		t.Errorf("default TODO.md has %d open items, want none (a heading only)", n)
+	}
+	if b, _ := os.ReadFile(w.TodoPath()); string(b) != "# AISW-53270 — disagg toggle requires pause\n\n" {
+		t.Errorf("default TODO.md: %q", b)
 	}
 	if _, err := filepath.Glob(w.NotesDir()); err != nil {
 		t.Error(err)
@@ -137,5 +140,15 @@ func TestFinishedAndUntouched(t *testing.T) {
 	os.WriteFile(filepath.Join(w.NotesDir(), "a.md"), []byte("x"), 0o644)
 	if w.Untouched() {
 		t.Fatal("a note should count as touched")
+	}
+	os.Remove(filepath.Join(w.NotesDir(), "a.md"))
+	// the template before this one still reads as untouched
+	os.WriteFile(w.TodoPath(), []byte(legacyTodo(w)), 0o644)
+	if !w.Untouched() || w.OpenTodos() != 5 {
+		t.Fatalf("legacy template: untouched=%v open=%d", w.Untouched(), w.OpenTodos())
+	}
+	os.WriteFile(w.TodoPath(), []byte(legacyTodo(w)+"- [ ] mine\n"), 0o644)
+	if w.Untouched() {
+		t.Fatal("an edited legacy file counts as touched")
 	}
 }
