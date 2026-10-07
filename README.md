@@ -57,7 +57,7 @@ named `<category>_<id>_<short-desc>`:
 ```
 ~/workstreams/
   work_AISW-53270_disagg-toggle-requires-pause/
-    workstream.toml      id, category, description, code dir, refs
+    workstream.toml      id, category, description, code dir, refs, opencode session + port
     TODO.md              the workstream's checklist (- [ ] items; the count shows in the bar)
     notes/               dictation and free-form notes
   personal_tim-0001_juggler-dev/
@@ -225,6 +225,21 @@ parked ones in the lot alike, so each tab comes back with opencode already
 up. It interrupts whatever the TUIs were doing; the sessions themselves are
 kept. The web UI's *↻ opencode* button does the same, after asking.
 
+**Talking to a session.** Each TUI is also started with `--port <p>
+--hostname 127.0.0.1` (the port is allocated with the session and kept as
+`opencode_port` in `workstream.toml`), so the HTTP API that opencode serves
+from every process is reachable at a known loopback address. **`jug say
+--ws AISW-53270 "…"`** sends a message *through that window's own server*:
+it appears in the window as if typed, the model turn runs there, and the
+reply lands there. That is the only way in that the TUI sees — writing to
+the session from a second server (`opencode run -s <id>` while the window
+is open) is invisible to it and races it, so `jug say` refuses when there
+is a window it cannot reach, and only runs headless when there is no
+window at all. **`jug session status`** asks the window what the session
+is doing (`idle` / `busy` / `retry`) and whether a permission prompt is
+waiting there. Permission prompts are answered in *that* window, by the
+human looking at it — never by the sender. See UC7c.
+
 ## Install
 
 Requirements: sway (tested on 1.9), alacritty (the only terminal exercised:
@@ -376,6 +391,47 @@ jug relaunch AISW-53270     # just this one — same as `jug session --relaunch 
 Parked workstreams are relaunched in place in the lot; a workstream whose
 opencode you closed is skipped (`jug show` starts one), one without windows
 is not a candidate.
+
+### UC7c — Talk to another workstream's session
+
+One session is working an epic and wants the story workstreams to do
+their part; or you are in `AISW-53270` and want to tell `AISW-52787`'s
+session something without switching. `jug say` sends a message to a
+workstream's opencode session **through its live window**: the TUI there
+shows it as a prompt and the assistant answers there.
+
+```sh
+jug say --ws AISW-52787 "Read TODO.md and notes/2026-10-07-brief.md, then start on the first item."
+#  → sent to AISW-52787's window (127.0.0.1:45617) — `jug session status --ws AISW-52787` to follow
+jug say --ws AISW-52787 - < notes/brief.md          # the message from stdin
+jug say --ws AISW-52787 --draft "and then run the e2e tests"   # typed into its prompt box; you press Enter there
+jug say --ws AISW-52787 --wait "summarize where you are in three lines"   # blocks, prints the reply
+jug say --ws AISW-52787 --queue "next: the follow-up ticket"   # busy now: sent once idle (--timeout, default 20m)
+
+jug session status --ws AISW-52787       # idle | busy | retry  127.0.0.1:45617  [permission pending: bash git push …]
+jug session status --all                 # every pinned session, one line each
+```
+
+What each result means, and what `jug say` refuses:
+
+| the target's window | `jug say` | `--wait` | `--draft` |
+|---|---|---|---|
+| live, idle | sent (`prompt_async`): the turn runs in that window | sends and waits for the reply there | typed into its prompt |
+| live, **busy** / **retry** | refused (`busy`) — `--queue` waits for idle, `--force` sends anyway (opencode queues or drops it, version-dependent) | same | typed (always safe) |
+| live but **not answering** (started before ports: `no-port`; or still starting) | refused: `jug relaunch WS` first — a headless turn now would write to the session behind the window's back | same | refused |
+| **no window** (`closed`) | refused: `jug show WS` starts one (the turn then runs there), or use `--wait` | runs `opencode run -s <id>` headless in the code dir with the workstream's `JUG_*` env; the reply comes back to you | refused |
+
+The sender is never asked anything: **a permission prompt the turn raises
+appears in the target's window** and waits for whoever looks at it; `jug
+session status` then says `busy  permission pending: bash …` so a session
+stuck on a human can be told from one that is working. A session cannot
+`jug say` to its own workstream (the `--ws` default is `$JUG_WORKSTREAM`,
+so a coordinator passes `--ws` every time). The result of the work comes
+back the way everything else does — the target's `TODO.md` and `## Log`,
+its branch, its PR — not as a reply; `--wait` is for a short answer.
+
+A window gets its port when it is (re)started: after installing a `jug`
+with this feature, `jug relaunch --all` once.
 
 ### UC8 — Keep the workstream's own to-do list
 
@@ -618,9 +674,12 @@ jug term [--title T] [-- CMD…]   terminal in the right stack
 jug notes | review | focus       TODO.md / diff / focus opencode
 jug dictate                      dictator notes into <ws>/notes
 jug env [--ws WS]                export JUG_* for a shell: eval "$(jug env)"
-jug session [--ws WS] [--relaunch]            the pinned opencode session (id, updated, dir, title)
+jug session [--ws WS] [--relaunch]            the pinned opencode session (id, updated, dir, title, port)
 jug session pick [--all] [--relaunch]         adopt an existing session (titles matching id/refs; --all: everything)
 jug session pin ID | new | unpin [--relaunch] pin an id / create a fresh titled one / forget the pin
+jug session status [--ws WS | --all] [--json] idle | busy | retry, asked of the live window; pending permission prompts (exit 0/1/3)
+jug say [--ws WS] [--wait | --draft] [--queue | --force] [--timeout D] [--json] TEXT… | -
+                                 message the workstream's session through its live window (UC7c)
 jug relaunch --all | WS…         restart opencode window(s) on their pinned sessions, in place (parked ones too)
 jug ls [--group G] [--finished] [--json]   all workstreams (or those tagged G); finished ones only with --finished/--json
 jug complete WS | reopen WS      mark done in juggler (the ticket is not touched) / take it back
@@ -740,6 +799,9 @@ Do not put it behind a reverse proxy.
 | `PUT /workstreams/{ws}/session` | `jug session pin\|new` | `{id}` or `{new: true}`, `{relaunch}` |
 | `DELETE /workstreams/{ws}/session` | `jug session unpin` | |
 | `POST /workstreams/{ws}/session/relaunch` | `jug session --relaunch` | |
+| `GET /workstreams/{ws}/session/status` | `jug session status` | `{id, session, port, status: none\|no-port\|closed\|idle\|busy\|retry\|error, detail, version, pending_permissions}` — asks the live window, no sway needed |
+| `GET /sessions/status` | `jug session status --all` | `[…]` for every pinned session, in name order |
+| `POST /workstreams/{ws}/say` | `jug say` | `{text, mode: async\|wait\|draft, queue, force, timeout: "20m"}` → `{via: tui\|run, port, waited, reply, cost}`; `wait` holds the request for the reply; 409 `busy` / `no_live_tui`, 404 `no_session` |
 | `POST /relaunch` | `jug relaunch --all` · `jug relaunch WS…` | `{workstreams: [ws…]}` optional (default: every one with an opencode window) → `{relaunched, skipped, errors}`; 503 without sway |
 
 `WorkstreamInfo` (also what `jug ls --json` prints):
@@ -751,7 +813,7 @@ Do not put it behind a reverse proxy.
   "refs": [{ "type": "jira", "key": "AISW-53270", "url": "https://…/browse/AISW-53270", "status": "Blocked" }],
   "groups": ["PCFS-S20-26.09.23-Nebula"], "source": "nebula", "owner": "",
   "ticket_closed": false, "completed": "", "finished": false,
-  "opencode_session": "ses_…", "state": "parked", "todos_open": 2, "shown": "2026-10-05T12:00:00-04:00",
+  "opencode_session": "ses_…", "opencode_port": 45617, "state": "parked", "todos_open": 2, "shown": "2026-10-05T12:00:00-04:00",
   "git": { "root": "/home/me/workstreams/…/src/ezaddon-mlis", "branch": "tim/aisw-53270-…", "head": "48faeb67", "dirty": false, "linked": true, "main": "/home/me/src/ezaddon-mlis", "upstream": "origin/…", "ahead": 0, "behind": 0 } }
 ```
 
@@ -878,6 +940,7 @@ one message):
 | sway splits a command batch on `;` while tracking quotes, but an escaped quote directly followed by a quote (the shell idiom `'\''` ending a word) makes it hand the *rest of the batch* to `exec`'s shell | every argument juggler puts in an `exec` is quoted without backslashes: `'` becomes `'"'"'`, `\` becomes `'\\'` (`layout.ShellQuote`) |
 | a linked worktree's `.git` is a *file* holding an absolute `gitdir:` path into the main checkout; one branch can be checked out in one worktree; `git worktree remove` is the only clean way out | the main checkout must not move; `jug rm` goes through git; `jug ls` shows branch + `*` for dirty |
 | opencode's `/session` API is reachable from a transient `opencode serve`; a session created with `?directory=<code dir>` belongs to that project, and `-s <id>` opens a session from any project | `jug` creates/pins sessions through the public API, never the database |
+| every opencode process serves that same API — a TUI started with `--port <p> --hostname 127.0.0.1` listens on it from the TUI process itself; a TUI only renders what goes through *its* server, so a session written from another process is invisible to the window showing it; a `prompt_async` to the TUI's server runs the turn in that process and raises permission prompts in that window; `GET /session/status` says `idle`/`busy`/`retry` per session and `GET /permission` lists the prompts waiting | each TUI gets a port of its own (`opencode_port`, kept with the pin); `jug say` and `jug session status` talk to the window's server and refuse to go behind its back (`internal/oc.Client`, `app.Say`) |
 
 The menu is a tiny TUI: from a hotkey `jug menu` has no terminal, so it
 re-launches itself in a floating alacritty (`for_window [app_id=jug-menu]`),
@@ -1040,6 +1103,13 @@ that are not hotkeys.
 | 74 | — | `make poc-ensure` | 11 `PASS` lines, your focused workspace never changes, scratch windows gone afterwards |
 | 75 | UC7b | `jug relaunch <parked ws>` while on another workspace; then `jug relaunch --all` | the parked tab in the lot gets a new opencode window (new pid, `swaymsg -t get_tree` shows a new `:left` stack, same ⅓) resumed on its pinned session, your focus unchanged, ~0.5 s; `--all` prints one `relaunched` line per live workstream (displayed first), `skipped` for a live one whose opencode you had closed, and the count; the displayed workstream's opencode comes back focused |
 | 76 | web | *↻ opencode* → cancel; again → confirm | nothing happens on cancel; on confirm a toast says `N relaunched[, M skipped]`, the detail pane's session block still shows the same pinned id |
+| 77 | UC7c | after `jug relaunch --all`: `jug session status --all`; `pgrep -af "opencode -s"` | every live workstream is `idle  127.0.0.1:<port>` (closed ones `closed`), each `opencode -s <id>` carries `--port <that port> --hostname 127.0.0.1`, `workstream.toml` has `opencode_port`, `ss -ltnp` shows the TUI pid listening on it |
+| 78 | UC7c | from a terminal in workstream A: `jug say --ws <B> --draft "hello from A"`; look at B's window (`jug show B` or the lot) | the text sits in B's prompt box, unsent; Enter there sends it |
+| 79 | UC7c | `jug say --ws <B> "Reply with the single word pong."`; `jug session status --ws <B>` right away, then after the reply | the message renders in B's window as a user message and the assistant answers there; status is `busy` during the turn, `idle` after; the sender printed `sent to B's window (127.0.0.1:<port>)` at once |
+| 80 | UC7c | `jug say --ws <B> --wait "Reply with the single word pong."` | blocks, prints `pong`; the same exchange is visible in B's window |
+| 81 | UC7c | make B ask for a permission (e.g. `jug say --ws <B> "cat ~/tmp/hpe/secrets/jira.token"` with that path on `ask`); `jug session status --ws <B>`; then `jug say --ws <B> "x"` | status `busy  …  permission pending: external_directory …`; the second say is refused `busy` with the `--queue` / `--force` hints; answering the prompt in B's window ends the turn; `--queue` from before would have sent after that |
+| 82 | UC7c | `jug say` from A to A (no `--ws`); `jug say --ws <C>` where C has no windows; `jug say --ws <C> --wait "Reply pong."` | refused: `refusing to message the workstream this command runs in`; refused: `no live opencode window … jug show C … --wait`; the third runs `opencode run -s <C's session>` headless, prints `pong`, and the next `jug show C` shows that exchange in C's TUI |
+| 83 | web | `curl -s 127.0.0.1:7474/api/v1/sessions/status | jq .`; `curl -s -X POST 127.0.0.1:7474/api/v1/workstreams/<B>/say -d '{"text":"Reply pong.","mode":"wait","timeout":"2m"}' | jq .` | the same states as step 77 as JSON; the POST returns `{via: "tui", reply: "pong", …}` and the exchange is in B's window |
 
 Automated: `make test` (store naming/resolution, picker rows and the
 new-workstream spec, sway-safe shell quoting, group validation/ordering and
@@ -1075,8 +1145,23 @@ renders the UI headlessly (list + detail) and fails on console errors.
 - **The web UI has no authentication.** It is a local control panel bound
   to loopback; anything that can reach the port can run `jug` as you.
 - **Session operations start a short-lived `opencode serve`** (~1 s) — on
-  the first show of a workstream and for `jug session …`. Set
-  `opencode_sessions = false` to launch the configured command as-is.
+  the first show of a workstream and for `jug session …` (not for `jug say`
+  and `jug session status`, which talk to the live window). Set
+  `opencode_sessions = false` to launch the configured command as-is — then
+  there is no port either, and `jug say` has nothing to talk to.
+- **`jug say` reaches a window only once it has a port.** Windows started
+  before this feature say `no-port` until `jug relaunch`ed; a port that some
+  other process grabbed in between is replaced at the next launch (the
+  workstream's TUI is the only intended listener). Nothing is pushed back
+  to the sender: a permission prompt raised by the turn waits in the
+  target's window (`jug session status` shows it as `permission pending`),
+  the reply shows there, and the work's result travels through the
+  target's `TODO.md`, branch and PR — `--wait` is for a short answer. A
+  busy session is refused by default because what opencode does with a
+  prompt sent mid-turn (queue it, drop it) is version-dependent; `--queue`
+  waits for idle. The headless fallback (`--wait` with no window) is
+  `opencode run -s <id>`, which has no human attached: a permission it must
+  ask for is not granted.
 - **The lot is one extra workspace in the bar** (`WS+`), present only while
   something is parked. Tab titles there are sway's container representation
   plus the `jug:` mark.

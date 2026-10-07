@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -341,4 +342,100 @@ func TestRefuseNonLoopback(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "refusing") {
 		t.Fatalf("expected refusal, got %v", err)
 	}
+}
+
+// fakeTUI answers the opencode routes the say/status endpoints use.
+func fakeTUI(t *testing.T, busy bool) int {
+	t.Helper()
+	m := http.NewServeMux()
+	m.HandleFunc("GET /global/health", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{"healthy":true,"version":"t"}`)) })
+	m.HandleFunc("GET /session/status", func(w http.ResponseWriter, r *http.Request) {
+		if busy {
+			_, _ = w.Write([]byte(`{"ses_1":{"type":"busy"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{}`))
+	})
+	m.HandleFunc("GET /permission", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[{"id":"p","sessionID":"ses_1","permission":"bash","patterns":["rm -rf x"],"metadata":{},"always":[]}]`))
+	})
+	m.HandleFunc("POST /session/{id}/prompt_async", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) })
+	m.HandleFunc("POST /session/{id}/message", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"info":{"id":"m","cost":1},"parts":[{"type":"text","text":"ok then"}]}`))
+	})
+	m.HandleFunc("POST /tui/append-prompt", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`true`)) })
+	ts := httptest.NewServer(m)
+	t.Cleanup(ts.Close)
+	var port int
+	_, _ = fmt.Sscanf(ts.URL, "http://127.0.0.1:%d", &port)
+	return port
+}
+
+func TestSayAndSessionStatus(t *testing.T) {
+	ts, a := newTestServer(t)
+	a.Cfg.OpencodeSessions = true
+	t.Setenv("JUG_WORKSTREAM", "")
+	want(t, call(t, ts, "POST", "/api/v1/workstreams", map[string]any{"desc": "story", "jira": "S-1"}), 201)
+
+	// no session pinned
+	r := want(t, call(t, ts, "GET", "/api/v1/workstreams/S-1/session/status", nil), 200)
+	if r.body["status"] != "none" {
+		t.Fatalf("status: %s", r.raw)
+	}
+	want(t, call(t, ts, "POST", "/api/v1/workstreams/S-1/say", map[string]any{"text": "hi"}), 404) // no_session
+	want(t, call(t, ts, "POST", "/api/v1/workstreams/S-1/say", map[string]any{}), 400)
+	want(t, call(t, ts, "POST", "/api/v1/workstreams/S-1/say", map[string]any{"text": "hi", "mode": "shout"}), 400)
+	want(t, call(t, ts, "POST", "/api/v1/workstreams/S-1/say", map[string]any{"text": "hi", "timeout": "soon"}), 400)
+	want(t, call(t, ts, "POST", "/api/v1/workstreams/nope/say", map[string]any{"text": "hi"}), 404)
+
+	// pinned, no port: status says so; say has nothing to reach (no window without sway)
+	want(t, call(t, ts, "PUT", "/api/v1/workstreams/S-1/session", map[string]any{"id": "ses_1"}), 200)
+	r = want(t, call(t, ts, "GET", "/api/v1/workstreams/S-1/session/status", nil), 200)
+	if r.body["status"] != "no-port" {
+		t.Fatalf("status: %s", r.raw)
+	}
+	r = call(t, ts, "POST", "/api/v1/workstreams/S-1/say", map[string]any{"text": "hi"})
+	if r.code != 409 || r.body["code"] != "no_live_tui" {
+		t.Fatalf("say without a tui: %d %s", r.code, r.raw)
+	}
+	if r := want(t, call(t, ts, "GET", "/api/v1/sessions/status", nil), 200); len(r.list) != 1 || r.list[0]["id"] != "S-1" {
+		t.Fatalf("all: %s", r.raw)
+	}
+
+	// a live (fake) TUI: idle → sent; wait → reply; draft → typed
+	ws, _ := a.Resolve("S-1")
+	ws.OpencodePort = fakeTUI(t, false)
+	if err := a.Store.Save(ws); err != nil {
+		t.Fatal(err)
+	}
+	r = want(t, call(t, ts, "GET", "/api/v1/workstreams/S-1/session/status", nil), 200)
+	if r.body["status"] != "idle" || r.body["version"] != "t" {
+		t.Fatalf("idle status: %s", r.raw)
+	}
+	r = want(t, call(t, ts, "POST", "/api/v1/workstreams/S-1/say", map[string]any{"text": "go"}), 200)
+	if r.body["via"] != "tui" || r.body["mode"] != "async" {
+		t.Fatalf("say: %s", r.raw)
+	}
+	r = want(t, call(t, ts, "POST", "/api/v1/workstreams/S-1/say", map[string]any{"text": "go", "mode": "wait", "timeout": "5s"}), 200)
+	if r.body["reply"] != "ok then" || r.body["cost"].(float64) != 1 {
+		t.Fatalf("say wait: %s", r.raw)
+	}
+	r = want(t, call(t, ts, "POST", "/api/v1/workstreams/S-1/say", map[string]any{"text": "later", "mode": "draft"}), 200)
+	if r.body["mode"] != "draft" {
+		t.Fatalf("say draft: %s", r.raw)
+	}
+
+	// busy with a permission prompt pending: status shows it, say is 409 unless forced
+	ws.OpencodePort = fakeTUI(t, true)
+	_ = a.Store.Save(ws)
+	r = want(t, call(t, ts, "GET", "/api/v1/workstreams/S-1/session/status", nil), 200)
+	if r.body["status"] != "busy" || r.body["pending_permissions"].([]any)[0] != "bash rm -rf x" {
+		t.Fatalf("busy status: %s", r.raw)
+	}
+	r = call(t, ts, "POST", "/api/v1/workstreams/S-1/say", map[string]any{"text": "go"})
+	if r.code != 409 || r.body["code"] != "busy" {
+		t.Fatalf("say busy: %d %s", r.code, r.raw)
+	}
+	want(t, call(t, ts, "POST", "/api/v1/workstreams/S-1/say", map[string]any{"text": "go", "force": true}), 200)
+	want(t, call(t, ts, "POST", "/api/v1/workstreams/S-1/say", map[string]any{"text": "go", "mode": "draft"}), 200)
 }

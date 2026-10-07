@@ -3,6 +3,7 @@ package store
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -150,5 +151,34 @@ func TestFinishedAndUntouched(t *testing.T) {
 	os.WriteFile(w.TodoPath(), []byte(legacyTodo(w)+"- [ ] mine\n"), 0o644)
 	if w.Untouched() {
 		t.Fatal("an edited legacy file counts as touched")
+	}
+}
+
+func TestSessionAndPortRoundTrip(t *testing.T) {
+	s := newStore(t)
+	w, _ := s.Resolve("tim-0001")
+	w.OpencodeSession, w.OpencodePort = "ses_abc", 45617
+	if err := s.Save(w); err != nil {
+		t.Fatal(err)
+	}
+	again, err := s.Resolve("tim-0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.OpencodeSession != "ses_abc" || again.OpencodePort != 45617 {
+		t.Fatalf("round trip: session=%q port=%d", again.OpencodeSession, again.OpencodePort)
+	}
+	b, _ := os.ReadFile(filepath.Join(w.Dir, FileName))
+	if !strings.Contains(string(b), "opencode_port = 45617") {
+		t.Fatalf("workstream.toml lacks the port:\n%s", b)
+	}
+	// 0 is "none yet" and is not written
+	again.OpencodePort = 0
+	if err := s.Save(again); err != nil {
+		t.Fatal(err)
+	}
+	b, _ = os.ReadFile(filepath.Join(w.Dir, FileName))
+	if strings.Contains(string(b), "opencode_port") {
+		t.Fatalf("a zero port should be omitted:\n%s", b)
 	}
 }
