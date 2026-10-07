@@ -129,6 +129,10 @@ type SetOptions struct {
 	ID       string
 	Desc     string
 	Jira     string // attach this ticket; also sets ID (and Category "work") unless given
+	// Subdir, when set, moves the code dir to this path inside the checkout
+	// the current code dir belongs to ("." = its root). Windows already
+	// open keep the old dir until the workstream is closed and shown again.
+	Subdir *string
 }
 
 // SetResult says what Set did.
@@ -136,6 +140,7 @@ type SetResult struct {
 	OldName  string   `json:"old_name"`
 	Name     string   `json:"name"`
 	Moved    bool     `json:"moved"`
+	CodeDir  string   `json:"code_dir,omitempty"` // the new code dir when Subdir changed it
 	Warnings []string `json:"warnings,omitempty"`
 }
 
@@ -173,6 +178,16 @@ func (a *App) Set(e *layout.Engine, w *store.Workstream, o SetOptions) (SetResul
 	}
 	if o.Desc != "" {
 		w.Desc = strings.TrimSpace(o.Desc)
+	}
+	if o.Subdir != nil {
+		code, err := a.codeDirAt(w, *o.Subdir)
+		if err != nil {
+			return res, err
+		}
+		if code != w.CodeDir {
+			w.CodeDir = code
+			res.CodeDir = w.ResolvedCodeDir()
+		}
 	}
 	newDir := filepath.Join(a.Cfg.Root, store.DirName(w.Category, w.ID, w.Desc))
 	res.Name = filepath.Base(newDir)
@@ -212,12 +227,11 @@ func (a *App) Set(e *layout.Engine, w *store.Workstream, o SetOptions) (SetResul
 	if err := a.Store.Save(w); err != nil {
 		return res, err
 	}
-	code := w.ResolvedCodeDir()
-	if w.CodeInside() && gitwt.IsLinkedWorktree(code) {
-		if err := gitwt.Repair(code); err != nil {
+	if root, ok := a.WorktreeRoot(w); ok {
+		if err := gitwt.Repair(root); err != nil {
 			res.Warnings = append(res.Warnings, "git worktree repair: "+err.Error())
 		}
-		if err := seed.DirenvAllow(code); err != nil {
+		if err := seed.DirenvAllow(root); err != nil {
 			res.Warnings = append(res.Warnings, err.Error())
 		}
 	}
@@ -232,6 +246,37 @@ func (a *App) Set(e *layout.Engine, w *store.Workstream, o SetOptions) (SetResul
 		}
 	}
 	return res, nil
+}
+
+// codeDirAt is the code_dir value that puts windows at subdir inside the
+// checkout w's current code dir belongs to — relative when that checkout is
+// w's own worktree, absolute for an outside checkout. "" or "." = its root.
+func (a *App) codeDirAt(w *store.Workstream, subdir string) (string, error) {
+	sub, err := CleanSubdir(subdir)
+	if err != nil {
+		return "", err
+	}
+	if w.CodeDir == "" {
+		return "", fmt.Errorf("%w: %s has no code dir to move within (add a worktree first)", ErrInvalid, w.ID)
+	}
+	root, ok := a.WorktreeRoot(w)
+	if !ok {
+		if root, err = gitwt.Toplevel(w.ResolvedCodeDir()); err != nil {
+			return "", fmt.Errorf("%w: %s is not inside a git checkout", ErrInvalid, w.ResolvedCodeDir())
+		}
+	}
+	code := filepath.Join(root, sub)
+	if !isDir(code) {
+		return "", fmt.Errorf("%w: %s has no directory %s", ErrInvalid, root, sub)
+	}
+	if w.CodeInside() {
+		rel, err := filepath.Rel(w.Dir, code)
+		if err != nil {
+			return "", err
+		}
+		return rel, nil
+	}
+	return code, nil
 }
 
 // Remove closes w's windows (when e is given), removes its worktree

@@ -78,7 +78,7 @@ function daysLeftText(g) {
 function reportSummary(r) {
   const parts = [];
   const add = (a, w) => { if (a && a.length) parts.push(`${a.length} ${w}`); };
-  add(r.created, 'created'); add(r.adopted, 'adopted'); add(r.updated, 'updated'); add(r.regrouped, 'regrouped'); add(r.tombstoned, 'tombstoned'); add(r.groups_registered, 'groups registered'); add(r.groups_updated, 'groups updated'); add(r.errors, 'errors');
+  add(r.created, 'created'); add(r.adopted, 'adopted'); add(r.updated, 'updated'); add(r.regrouped, 'regrouped'); add(r.tombstoned, 'tombstoned'); add(r.refs, 'refs refreshed'); add(r.groups_registered, 'groups registered'); add(r.groups_updated, 'groups updated'); add(r.errors, 'errors');
   const tail = [`${r.unchanged} unchanged`]; if (r.finished && r.finished.length) tail.push(`${r.finished.length} finished skipped`); if (r.prunable && r.prunable.length) tail.push(`${r.prunable.length} prunable`);
   return (parts.length ? parts.join(', ') : 'nothing to do') + ` (${tail.join(', ')})`;
 }
@@ -305,10 +305,12 @@ function renderDetail() {
     <fieldset><legend>code</legend>
       ${g ? raw(h`<dl class="kv">
           <dt>path</dt><dd>${short(d.code_path)}${d.code_inside ? ' (inside)' : ''}</dd>
+          ${g.root && g.root !== d.code_path ? raw(h`<dt>checkout</dt><dd title="the code dir is a subdirectory; seeds, the dirty check and removal address the checkout">${short(g.root)}</dd>`) : ''}
           <dt>branch</dt><dd>${g.branch || '(detached)'} @ ${g.head}${g.dirty ? raw(' <span class="badge dirty">dirty</span>') : ''}</dd>
           ${g.upstream ? raw(h`<dt>upstream</dt><dd>${g.upstream} ${g.ahead > 0 ? '↑' + g.ahead : ''} ${g.behind > 0 ? '↓' + g.behind : ''}</dd>`) : ''}
           ${g.linked ? raw(h`<dt>worktree of</dt><dd>${short(g.main)}</dd>`) : ''}
         </dl>
+        <form id="f-subdir" class="row sm" style="margin-top:8px"><span class="muted">start windows in</span><input name="subdir" value="${subdirOf(d, g)}" placeholder="." style="width:280px" title="a path inside the checkout; . = its root"><button>move</button>${d.state !== 'none' ? raw('<span class="muted small">open windows keep the old dir until closed and shown again</span>') : ''}</form>
         ${d.code_inside ? raw('<div class="row sm" style="margin-top:8px"><button data-act="seed">re-seed files</button><button data-act="seed-force" title="overwrite existing seeded files">re-seed (force)</button></div>') : ''}`)
         : raw(h`<div class="muted small">${d.has_code ? h`code dir ${short(d.code_path)} is not a git checkout` : 'no code dir — terminals and opencode start in the workstream directory'}</div>`)}
       ${!d.code_inside ? raw(worktreeForm()) : ''}
@@ -355,6 +357,16 @@ function renderDetail() {
   renderSession();
 }
 
+// subdirOf is the code dir's path inside its checkout ("." at the root).
+function subdirOf(d, g) {
+  if (!g || !g.root || !d.code_path || !d.code_path.startsWith(g.root)) return '.';
+  const rel = d.code_path.slice(g.root.length).replace(/^\/+/, '');
+  return rel || '.';
+}
+
+// repoSubdir is the configured default subdir of a repo, for the forms' placeholder.
+function repoSubdir(name) { const r = S.repos.find(x => x.name === name); return (r && r.subdir) || ''; }
+
 function worktreeForm() {
   if (!S.repos.length) return '<div class="muted small" style="margin-top:8px">no repos configured ([repos.&lt;name&gt;] in config.toml) — add a worktree from the CLI with a path: <code>jug repo add --repo /path/to/checkout</code></div>';
   return h`<form id="f-wt" class="row sm" style="margin-top:8px">
@@ -362,6 +374,7 @@ function worktreeForm() {
     <select name="repo">${raw(S.repos.map(r => h`<option value="${r.name}" ${r.ok ? '' : 'disabled'}>${r.name}${r.ok ? '' : ' (missing)'}</option>`).join(''))}</select>
     <input name="branch" placeholder="branch (default: id or user/slug)" style="width:220px">
     <input name="base" placeholder="base (default: remote HEAD)" style="width:170px">
+    <input name="subdir" placeholder="${repoSubdir(S.repos[0].name) ? 'subdir (default ' + repoSubdir(S.repos[0].name) + ')' : 'subdir (default: root)'}" style="width:200px" title="where windows start inside the worktree; . = the root">
     <label class="chk"><input type="checkbox" name="no_fetch"> no fetch</label>
     <button class="primary">add</button></form>`;
 }
@@ -468,7 +481,7 @@ function openCreate() {
       <div class="radio-group">
         <label><input type="radio" name="code" value="repo" ${repos.length ? 'checked' : 'disabled'}> worktree of
           <select name="repo" ${repos.length ? '' : 'disabled'}>${repos.map(r => `<option value="${esc(r.name)}">${esc(r.name)}</option>`).join('')}</select></label>
-        <div class="sub row sm"><input name="branch" placeholder="branch (default: id or user/slug)" style="width:220px"><input name="base" placeholder="base (default: remote HEAD)" style="width:170px"><label class="chk"><input type="checkbox" name="no_fetch"> no fetch</label></div>
+        <div class="sub row sm"><input name="branch" placeholder="branch (default: id or user/slug)" style="width:220px"><input name="base" placeholder="base (default: remote HEAD)" style="width:170px"><input name="subdir" placeholder="${repos.length && repoSubdir(repos[0].name) ? 'subdir (default ' + esc(repoSubdir(repos[0].name)) + ')' : 'subdir (default: root)'}" style="width:200px" title="where windows start inside the worktree; . = the root"><label class="chk"><input type="checkbox" name="no_fetch"> no fetch</label></div>
         <label><input type="radio" name="code" value="dir"> existing directory <input name="code_dir" placeholder="~/src/thing" style="flex:1"></label>
         <label><input type="radio" name="code" value="none" ${repos.length ? '' : 'checked'}> no code — notes only</label>
       </div>
@@ -482,7 +495,7 @@ function openCreate() {
     const body = { desc: fd.get('desc'), jira: fd.get('jira'), category: fd.get('category'), id: fd.get('id'), pr: fd.get('pr'), show: fd.get('show') === 'on' };
     body.groups = fd.getAll('groups'); if ((fd.get('newgroup') || '').trim()) body.groups.push(fd.get('newgroup').trim());
     const code = fd.get('code');
-    if (code === 'repo') { body.repo = fd.get('repo'); body.branch = fd.get('branch'); body.base = fd.get('base'); body.no_fetch = fd.get('no_fetch') === 'on'; }
+    if (code === 'repo') { body.repo = fd.get('repo'); body.branch = fd.get('branch'); body.base = fd.get('base'); body.subdir = (fd.get('subdir') || '').trim(); body.no_fetch = fd.get('no_fetch') === 'on'; }
     if (code === 'dir') { body.code_dir = fd.get('code_dir'); if (!body.code_dir) throw new Error('directory is required'); }
     if (!body.desc.trim()) throw new Error('a description is required');
     const r = await POST('/api/v1/workstreams', body);
@@ -493,6 +506,8 @@ function openCreate() {
   });
   $('#new-go').onclick = go;
   $('#f-new').onsubmit = (e) => { e.preventDefault(); go(); };
+  const repoSel = $('#f-new [name=repo]');
+  if (repoSel) repoSel.onchange = () => { const d = repoSubdir(repoSel.value); $('#f-new [name=subdir]').placeholder = d ? 'subdir (default ' + d + ')' : 'subdir (default: root)'; };
   setTimeout(() => $('#f-new [name=desc]').focus(), 30);
 }
 
@@ -623,7 +638,15 @@ document.addEventListener('submit', async (e) => {
     await busy(f.querySelector('button'), async () => { await POST(`/api/v1/groups/${encodeURIComponent(name)}/members`, { workstreams: [S.detail.name] }); toast(`added to ${name}`, 'ok'); await refreshAll(); await loadDetail(S.detail.name, { keepTodo: true }); })();
   } else if (fid === 'f-wt') {
     e.preventDefault();
-    await busy(f.querySelector('button'), async () => { const r = await POST(p + '/repo', { repo: fd.get('repo'), branch: fd.get('branch'), base: fd.get('base'), no_fetch: fd.get('no_fetch') === 'on' }); toast(r.worktree.what + (r.worktree.seeded && r.worktree.seeded.length ? ' · seeded ' + r.worktree.seeded.join(', ') : ''), 'ok'); if (S.detail.state !== 'none') toast('windows already open still use the old directory: close and show again to start them in the worktree'); await loadDetail(S.detail.name, { keepTodo: true }); scheduleRefresh(50); })();
+    await busy(f.querySelector('button'), async () => { const r = await POST(p + '/repo', { repo: fd.get('repo'), branch: fd.get('branch'), base: fd.get('base'), subdir: (fd.get('subdir') || '').trim(), no_fetch: fd.get('no_fetch') === 'on' }); toast(r.worktree.what + (r.worktree.code_dir !== r.worktree.path ? ' · windows start in ' + short(r.worktree.code_dir) : '') + (r.worktree.seeded && r.worktree.seeded.length ? ' · seeded ' + r.worktree.seeded.join(', ') : ''), 'ok'); if (S.detail.state !== 'none') toast('windows already open still use the old directory: close and show again to start them in the worktree'); await loadDetail(S.detail.name, { keepTodo: true }); scheduleRefresh(50); })();
+  } else if (fid === 'f-subdir') {
+    e.preventDefault();
+    await busy(f.querySelector('button'), async () => {
+      const sub = (fd.get('subdir') || '').trim() || '.';
+      const r = await PATCH(p, { subdir: sub });
+      toast(r.result.code_dir ? 'windows now start in ' + short(r.result.code_dir) : 'already there', 'ok');
+      await loadDetail(S.detail.name, { keepTodo: true }); scheduleRefresh(50);
+    })();
   }
 });
 document.addEventListener('click', async (e) => {

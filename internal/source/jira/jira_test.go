@@ -180,12 +180,12 @@ func TestOpenValidation(t *testing.T) {
 func TestPull(t *testing.T) {
 	ts := fakeJira(t)
 	src := openTestSource(t, ts, nil)
-	if src.Poll() != 5*time.Minute || src.Kind() != "jira" || src.Name() != "nebula" {
+	if src.Poll() != time.Hour || src.Kind() != "jira" || src.Name() != "nebula" {
 		t.Fatalf("defaults: %v %s %s", src.Poll(), src.Kind(), src.Name())
 	}
 	// assignee = "any": the old behaviour, everything in the sprint
 	src = openTestSource(t, ts, map[string]any{"assignee": "any"})
-	snap, err := src.Pull(context.Background(), []string{"P-1", "P-9", "P-404"})
+	snap, err := src.Pull(context.Background(), source.Inventory{Known: []string{"P-1", "P-9", "P-404"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +245,7 @@ func TestPull(t *testing.T) {
 
 	// default assignee = "me": every scope is restricted to your tickets
 	src = openTestSource(t, ts, nil)
-	snap, err = src.Pull(context.Background(), nil)
+	snap, err = src.Pull(context.Background(), source.Inventory{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +275,7 @@ func TestPullScopeMineOnlyAndJQL(t *testing.T) {
 	ts := fakeJira(t)
 	src := openTestSource(t, ts, map[string]any{"scope": []any{"open"}, "backlog_group": "", "jql": "project = P"})
 	// the fake only answers JQL prefixes it knows; the extra filter is appended after
-	snap, err := src.Pull(context.Background(), nil)
+	snap, err := src.Pull(context.Background(), source.Inventory{})
 	if err != nil {
 		t.Fatal(err)
 	}

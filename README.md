@@ -82,6 +82,14 @@ cheap, fully buildable checkout of its own branch (one branch per worktree,
 enforced by git). `jug rm` removes it properly. Repos are named in the
 config (`[repos.ezaddon-mlis] path = …`), so `--repo ezaddon-mlis` is enough.
 
+In a **monorepo** the worktree is the whole repository but the work is one
+component of it. The code dir may then point *below* the worktree root —
+`code_dir = "src/aie/components/app/hpe-mlis"` — so opencode and terminals
+start in the component; seeds, the dirty check and `jug rm` still address
+the worktree (juggler asks git where the root is). `--subdir` on `jug add`
+/ `jug repo add` sets it, a repo's `subdir` in the config makes it the
+default, `jug set WS --subdir` moves it later (`.` = the root).
+
 **Seeds.** Git does not carry the files a checkout needs but never commits —
 `.envrc`, a local `*.mk`, helper scripts. Put them in
 `~/.config/juggler/seed/<repo>/` and every new worktree of that repo gets a
@@ -101,8 +109,10 @@ workstream, say, its own virtualenv path; a seeded `.envrc` is
 | `issue`, `url` | anything else | docs, dashboards, a design page |
 
 Each ref caches a `title`, `status` and `updated` timestamp so the picker and
-the bar can show them without a network call. (Today these are written by
-`jug ref add`; keeping them fresh from Jira/GitHub is the next milestone.)
+the bar can show them without a network call. `jug ref add` writes them by
+hand; sources keep them fresh — the Jira source its tickets' refs, the GitHub
+source every `pr` ref (and it attaches the PR for a workstream's branch when
+none is recorded yet).
 
 **Groups.** A group is any bucket you want to see workstreams by — a sprint,
 a project, a date range, "backlog". It has two halves, kept apart on purpose:
@@ -162,9 +172,16 @@ connector:
   selects (or that finished) and that you never touched (no code dir, no
   session, the default `TODO.md`, no notes, not completed) — are reported
   as *prunable*; `jug source prune` removes them, without a tombstone, so a
-  ticket that comes back is simply recreated.
+  ticket that comes back is simply recreated;
+- a snapshot can also carry **ref updates** — facts about workstreams that
+  already exist, matched by the connector (a pull request, to the
+  workstream on its branch). The sync replaces the ref of the same type and
+  key exactly as `jug ref add` would, on any workstream, and never creates
+  or adopts one for it: a ticket is an identity, a PR is a fact about work
+  (a ticket can have a fix and a backport).
 
-`jug sync` runs it now; `jug serve` runs every source on its own `poll`.
+`jug sync` runs it now; `jug serve` runs every source on its own `poll`
+(default: hourly).
 
 **Finished.** A workstream is *finished* when its ticket is closed (as the
 source last saw it — `ticket_closed`) **or you marked it complete** (`jug
@@ -384,6 +401,9 @@ jug add --repo ezaddon-mlis --branch tim/fix-thing "fix thing"      # explicit b
 jug add --category personal --code-dir ~/src/juggler "juggler dev"  # any existing directory
 jug ref add pr https://github.example.com/org/repo/pull/897 --ws AISW-53270
 jug repo add --ws AISW-52932 --repo ezaddon-mlis                     # give an existing workstream its worktree
+jug add --jira AISW-54000 --repo aie --subdir components/app/hpe-mlis "monorepo work"
+#   -> worktree of the monorepo at …/src/aie; windows start in …/src/aie/components/app/hpe-mlis
+jug set AISW-54000 --subdir .                                        # back to the worktree root
 ```
 
 `--jira KEY` makes the id the key and the category `work` (unless
@@ -393,7 +413,10 @@ exists locally or on the remote (tracking it), else creates it from the
 remote's HEAD (`--base` to pick another). The branch defaults to the ticket
 key for ticket ids, else `<user>/<slug>`. If the branch is checked out in
 another worktree, git — and so `jug` — refuses. The repo's seed files (see
-Concepts) are copied in last.
+Concepts) are copied in last — into the worktree root, even with
+`--subdir` (direnv applies a root `.envrc` to every directory below it).
+`--subdir` defaults to the repo's `subdir` in the config; a subdir that does
+not exist in the branch is refused and nothing is left behind.
 
 ### UC10b — Python virtualenvs that survive worktrees
 
@@ -489,8 +512,7 @@ email         = "you@example.com"
 token         = "file:~/secrets/jira.token"
 board         = 2112               # the team's scrum board
 sprint_match  = "Nebula"           # the board lists other teams' sprints too
-poll          = "5m"
-# defaults: assignee = "me", scope = ["open", "sprint"] — your unresolved tickets,
+# defaults: poll = "1h", assignee = "me", scope = ["open", "sprint"] — your unresolved tickets,
 # plus yours in the current sprint; assignee = "any" pulls the whole team's sprint
 ```
 
@@ -505,7 +527,7 @@ What you get: one workstream per open ticket of yours, each sprint on the
 board as a group with its dates and a link to the board, the active sprint
 *current*, tickets in no open sprint under `backlog`. Closed tickets are
 never created; the ones you already have turn ✓ and drop out of the default
-views (see *Finished* under Concepts). Every five minutes the service
+views (see *Finished* under Concepts). Every hour (`poll`) the service
 refreshes status and sprint membership; the page updates live and the
 header chip says when the last pull was (click it to pull now). Your
 hand-made workstreams for the same tickets are adopted, not duplicated.
@@ -522,6 +544,33 @@ jug complete AISW-123       # done, for you — hidden from the picker and the d
 jug reopen AISW-123         # changed your mind
 jug source prune nebula     # list the leftovers; --yes removes them (never tombstoned)
 ```
+
+### UC16 — Let GitHub keep the PR refs
+
+```toml
+[sources.github]
+kind     = "github"
+base_url = "https://github.example.com"   # or https://github.com
+token    = "file:~/secrets/github.token"
+# repos  = ["org/repo"]                   # default: whatever the workstreams' checkouts point at on this host
+```
+
+```sh
+jug sync github --dry-run   # "N refs refreshed": which workstream, which PR
+jug sync github
+jug ls                      # PR column: open | draft | merged | closed, from GitHub
+```
+
+What you get: every `pr` ref on that host refreshed (title and state) each
+hour, and — for a workstream whose checkout is on a branch of its own —
+the pull requests of that branch attached as `pr` refs the moment they
+exist, without `jug ref add`. A merged PR shows `merged` but does not
+finish the workstream: the ticket does that (the fix may still need a
+backport, QA, a release note). Nothing is created or adopted by this
+source; it is `jug source ls`'s second row, with the same ledger, chip
+and `jug sync` as the Jira one. Shared main checkouts on their default
+branch are not looked up (that branch is nobody's PR), and a ref whose URL
+is on another host is left to a source for that host.
 
 ### UC13 — Manage everything from a browser
 
@@ -557,10 +606,10 @@ jug session pin ID | new | unpin [--relaunch] pin an id / create a fresh titled 
 jug ls [--group G] [--finished] [--json]   all workstreams (or those tagged G); finished ones only with --finished/--json
 jug complete WS | reopen WS      mark done in juggler (the ticket is not touched) / take it back
 jug add [--category C] [--id ID] [--jira KEY] [--pr URL] [--group G]… [--show] DESC…
-        [--code-dir D | --repo NAME|PATH [--branch B] [--base BASE] [--no-fetch]]
-jug repo add --repo NAME|PATH [--branch B] [--base BASE] [--ws WS]   worktree for an existing workstream
+        [--code-dir D | --repo NAME|PATH [--branch B] [--base BASE] [--no-fetch] [--subdir D]]
+jug repo add --repo NAME|PATH [--branch B] [--base BASE] [--subdir D] [--ws WS]   worktree for an existing workstream
 jug repo seed [--ws WS] [--force]                                   (re)copy the repo's seed files into the worktree
-jug set WS [--category C] [--id ID] [--desc D] [--jira KEY]   rename / recategorize (directory follows)
+jug set WS [--category C] [--id ID] [--desc D] [--jira KEY] [--subdir D]   rename / recategorize (directory follows); --subdir moves the code dir within its checkout
 jug rm WS [--yes] [--force]      remove: windows, worktree (branch kept), directory
 jug group ls [--all] [--json]    groups with members (--all: registered-but-empty too); * = current
 jug group show G [--json]        one group and its members
@@ -606,7 +655,9 @@ has windows and so is listed anyway), and *show*/*focus* and ✓ *complete*
 term, notes, review, open jira/pr, dictate, close windows, complete/reopen),
 an **edit** form
 (category, id, description, ticket — the directory follows), **code**
-(branch, head, upstream, worktree-of; *add worktree* / *re-seed*), **refs**
+(branch, head, upstream, worktree-of, the checkout root when the code dir
+is a subdirectory of it; *add worktree* with an optional subdir, *start
+windows in* to move it, *re-seed*), **refs**
 (add/remove/open), **groups** (a checkbox per known group, a box for a new
 one), a **TODO.md** editor, the **opencode session** (what is pinned, choose
 an existing session, new, relaunch, unpin) and **remove** with the same
@@ -628,7 +679,7 @@ Do not put it behind a reverse proxy.
 | `GET /status` | slot, displayed, lot, focused workspace | same picture the bar uses |
 | `GET /doctor` | the `jug doctor` checks | `[{ok, what, detail}]` |
 | `GET /config` | effective config, categories, repos | |
-| `GET /repos` | configured repos | `[{name, path, remote, default_branch, seed_dir, ok}]` |
+| `GET /repos` | configured repos | `[{name, path, remote, default_branch, subdir, seed_dir, ok}]` |
 | `GET /events` | Server-Sent Events | `hello`, `changed`, `tick` |
 | `POST /slot/toggle` | `jug toggle` | `{on, slot}` |
 | `POST /slot/park` · `/slot/park-others` | `jug park` · `jug park --others` | |
@@ -646,16 +697,16 @@ Do not put it behind a reverse proxy.
 | `POST /groups/{name}/members` | `jug group add` | `{workstreams: [ws…]}` → `GroupInfo` |
 | `DELETE /groups/{name}/members/{ws}` | `jug group remove` | 404 when not a member |
 | `GET /workstreams?group=NAME` | `jug ls --group` | `[WorkstreamInfo]` |
-| `POST /workstreams` | `jug add` | `{desc, jira, category, id, pr, groups, code_dir \| repo, branch, base, no_fetch, show}` → 201 `{workstream, worktree, warnings}` |
+| `POST /workstreams` | `jug add` | `{desc, jira, category, id, pr, groups, code_dir \| repo, branch, base, no_fetch, subdir, show}` → 201 `{workstream, worktree, warnings}` |
 | `GET /workstreams/{ws}` | one `WorkstreamInfo` | |
-| `PATCH /workstreams/{ws}` | `jug set` / retag | `{category, id, desc, jira, groups}` (any subset; `groups` replaces the tags) → `{result, workstream}` |
+| `PATCH /workstreams/{ws}` | `jug set` / retag | `{category, id, desc, jira, subdir, groups}` (any subset; `groups` replaces the tags; `subdir` moves the code dir within its checkout, `"."` = root) → `{result, workstream}`; `result.code_dir` when it moved |
 | `DELETE /workstreams/{ws}?force=true` | `jug rm --yes [--force]` | 409 `dirty` without force |
 | `GET /workstreams/{ws}/plan` | the `jug rm` dry run | `{has_worktree, worktree, branch, dirty}` |
 | `GET /workstreams/{ws}/env` | `jug env` | `{JUG_WORKSTREAM, …}` |
 | `GET` · `PUT /workstreams/{ws}/todo` | TODO.md | `{text}` → `{open}` |
 | `GET` · `POST /workstreams/{ws}/refs` | `jug ref ls` · `jug ref add` | `{type, value, title, status}` |
 | `DELETE /workstreams/{ws}/refs/{type}?key=…` | `jug ref rm` | `url=` works too |
-| `POST /workstreams/{ws}/repo` | `jug repo add` | `{repo, branch, base, no_fetch}` → 201 `{worktree, workstream}` |
+| `POST /workstreams/{ws}/repo` | `jug repo add` | `{repo, branch, base, no_fetch, subdir}` → 201 `{worktree: {repo, branch, path, code_dir, what, seeded}, workstream}` |
 | `POST /workstreams/{ws}/seed` | `jug repo seed` | `{force}` → `{seeded}` |
 | `POST /workstreams/{ws}/complete` · `/reopen` | `jug complete` · `jug reopen` | → `WorkstreamInfo` |
 | `POST /workstreams/{ws}/show` | `jug show` | `{no_switch}` |
@@ -679,7 +730,7 @@ Do not put it behind a reverse proxy.
   "groups": ["PCFS-S20-26.09.23-Nebula"], "source": "nebula", "owner": "",
   "ticket_closed": false, "completed": "", "finished": false,
   "opencode_session": "ses_…", "state": "parked", "todos_open": 5, "shown": "2026-10-05T12:00:00-04:00",
-  "git": { "branch": "tim/aisw-53270-…", "head": "48faeb67", "dirty": false, "linked": true, "main": "/home/me/src/ezaddon-mlis", "upstream": "origin/…", "ahead": 0, "behind": 0 } }
+  "git": { "root": "/home/me/workstreams/…/src/ezaddon-mlis", "branch": "tim/aisw-53270-…", "head": "48faeb67", "dirty": false, "linked": true, "main": "/home/me/src/ezaddon-mlis", "upstream": "origin/…", "ahead": 0, "behind": 0 } }
 ```
 
 `GroupInfo`:
@@ -743,6 +794,11 @@ default_branch = "develop"                     # base for new branches (default:
 # remote       = "origin"
 # seed_dir     = "~/.config/juggler/seed/ezaddon-mlis"   # the default, when it exists
 
+[repos.aie]                                    # a monorepo: windows start in one component
+path           = "~/src/aie"
+default_branch = "develop"
+subdir         = "components/app/hpe-mlis"     # default --subdir for new worktrees ("." on the command line = the root)
+
 [sources.nebula]                               # a source: kind + the connector's own keys
 kind          = "jira"
 base_url      = "https://yourcompany.atlassian.net"   # default: jira_base_url
@@ -755,9 +811,17 @@ scope         = ["open", "sprint"]             # open: unresolved tickets; sprin
 jql           = ""                             # extra filter ANDed to every scope, e.g. "issuetype != Epic"
 category      = "work"                         # for created workstreams
 backlog_group = "backlog"                      # tickets in no open sprint ("" = don't tag)
-poll          = "5m"                           # scheduler interval ("0" = manual only)
+poll          = "1h"                           # scheduler interval ("0" = manual only)
 # sprint_field = "customfield_10020"           # discovered from the instance when empty
 # group_url    = "{base}/jira/software/c/projects/{project}/boards/{board}?sprint={sprint}"
+
+[sources.github]                               # pr refs: refreshed, and attached for a workstream's branch
+kind     = "github"
+base_url = "https://github.example.com"        # the web host (github.com, or a GitHub Enterprise Server)
+token    = "file:~/secrets/github.token"       # a token that can read the repos (`repo` scope on GHES)
+# api_url = ""                                 # default: <base_url>/api/v3, or https://api.github.com
+# repos   = ["org/repo"]                       # restrict branch lookups to these; default: the checkouts' remotes on this host
+poll     = "1h"
 ```
 
 Credentials never appear in config files by value when `file:`/`env:` is
@@ -808,12 +872,12 @@ must survive everything else.
 
 ```
 config [sources.X]  ──kind──▶  Connector.Open  ──▶  Source
-                                                     │ Pull(known keys)
+                                                     │ Pull(inventory: known keys + a view of every workstream)
                                                      ▼
-                                                  Snapshot { groups[], items[] }
+                                                  Snapshot { groups[], items[], refs[] }
                                                      │ app.Sync (the rules under Concepts → Sources)
                                                      ▼
-                       groups.toml  ◀──register──  ──create/adopt/refresh/retag──▶  workstream.toml…
+                       groups.toml  ◀──register──  ──create/adopt/refresh/retag · set refs──▶  workstream.toml…
                                                      │
                                                      ▼
                                       ledger  sync/X.json  { owned, tombstones, last run/report }
@@ -830,6 +894,16 @@ local calendar days. Items in a closed-only or foreign sprint go to
 `backlog`; finished items are never backlogged, and never created. The
 ledger also remembers which keys the last pull selected: that is what
 *prunable* is measured against.
+
+The GitHub connector per pull: `/user` (once), then for every workstream
+whose checkout's remote is on the source's host and whose branch is not
+the repo's default, `pulls?state=all&head=<owner>:<branch>` (one request;
+every PR of that branch becomes a `pr` ref update), then one
+`pulls/{n}` per `pr` ref on that host the lists did not cover (a backport
+in another repo, a PR from another branch). The inventory it reads — the
+branch, the remote URL and the default branch per workstream — is built
+by the sync from git, once per main checkout per process. Refs on another
+host are left alone; a 404 (deleted PR) is a note, not a failure.
 
 **One service layer, three faces.** Every operation lives once, in
 `internal/app`, as a function that takes inputs and returns values. The CLI
@@ -924,16 +998,26 @@ that are not hotkeys.
 | 60 | UC15 | close one of your tickets in Jira; sync; `jug ls`; also a closed ticket of yours you have no workstream for | updated: its ref turns `closed`, the row is ✓ and hidden by default; the never-created one shows under `finished (skipped)` in the report and does not exist (`jug ls --finished`) |
 | 61 | UC15 | set `assignee = "any"`, sync (the team's sprint arrives, teammates' rows with OWNER); set it back to `"me"`, sync; `jug source prune nebula`; `jug source prune nebula --yes`; sync | after the narrowing sync the report ends `N prunable` and names them; prune without `--yes` lists the same keys and removes nothing; with `--yes` they are gone, `owned` dropped by N, no tombstones; the next sync is "nothing to do". A teammate's workstream you had opened (windows) or edited (TODO/notes/code/session) is **not** in the list |
 | 62 | UC15 | corrupt the ledger (`echo '{"owned":1}' > ~/.local/state/juggler/sync/nebula.json`), `jug source ls`, `jug sync nebula` | the source shows `ledger: … cannot unmarshal …` instead of "owns nothing"; the sync refuses with the same error and the file is left for you to fix (restore it or delete it — the next sync then re-adopts what it finds) |
+| 63 | UC10 | with `[repos.<mono>] subdir = "<component>"`: `jug add --jira X-1 --repo <mono> "sub"`; `jug ls`; `ls <ws>/src/<mono>/.envrc` | the worktree is `src/<mono>`, `CODE DIR` is `./src/<mono>/<component>`, the seeded `.envrc` sits at the worktree root (not in the component), `jug ls --json` shows `git.root` = the worktree and `git.linked` true; a terminal opened on it (`$mod+w` → term) starts in the component |
+| 64 | UC10 | `jug set X-1 --subdir nope`; `jug set X-1 --subdir .`; `jug set X-1 --subdir <component>`; `jug add --repo <mono> --subdir missing/dir "bad"` | the first is refused (`has no directory nope`), the second moves the code dir to the root and prints it, the third back; the last refuses and leaves no `src/<mono>` behind (`git worktree list` clean), the workstream exists without code |
+| 65 | UC11 | edit a file inside the component; `jug rm X-1`; `jug rm X-1 --yes`; `--yes --force` | the plan names the worktree root with `DIRTY (<component>/<file>)`; `--yes` refuses; `--force` removes it through git (`git worktree list` clean, branch kept) |
+| 66 | web | detail pane of a subdir workstream; *start windows in* `.` → move; *+ new* with a repo that has a subdir | the code section shows `checkout` (the root) above `branch`; moving reports the new dir and the row's code dir follows; the create form's subdir placeholder shows the repo's default and changes when another repo is chosen |
+| 67 | UC16 | add `[sources.github]`; `jug sync github --dry-run`; `jug sync github`; again | the dry run lists `refs refreshed: <ws> <owner/repo#n>` for refs whose title/state differ from GitHub and for PRs of branches with no ref yet; the real run writes them (`jug ref ls --ws …` shows the new state, `closed = true` for merged/closed); the second run is "nothing to do"; the report's note reads `<host> as <login>: N pull request(s) for M branch(es), K by ref` |
+| 68 | UC16 | open a PR from a workstream's branch (no `jug ref add`), sync; merge it, sync; point a workstream's code dir at a shared main checkout on `develop`, sync | the `pr` ref appears by itself with `open`; then `merged` with the row still *not* ✓ (the ticket is open); the main checkout's branch is not looked up (the note's branch count does not grow) |
+| 69 | UC16 | `jug ref add pr https://github.com/other/repo/pull/1 --ws X` on a GHES source; break the token; sync | the github.com ref is untouched by the GHES source; with a bad token `jug source ls` shows `error: github /user: HTTP 401` and nothing is written |
 
 Automated: `make test` (store naming/resolution, picker rows and the
 new-workstream spec, sway-safe shell quoting, group validation/ordering and
 the registry, the Jira connector against a fake Jira server — pagination,
-owner detection, sprint→group rules, local dates, URLs — the sync rules
-against a fake source — create/adopt/refresh/regroup, finished never
-created, prunable and prune, complete/reopen, tombstones by removal and by
-inference, forgive, dry run, an unreadable ledger, other sources'
-workstreams untouched — the service layer's store-only paths, and the HTTP
-API end to end against a temp store without sway). The
+owner detection, sprint→group rules, local dates, URLs — the GitHub connector against a fake API — branch lookups, by-ref
+refreshes, host and default-branch rules, request discipline, remote URL
+forms — the sync rules against a fake source — create/adopt/refresh/regroup,
+finished never created, prunable and prune, complete/reopen, ref updates
+never creating, tombstones by removal and by inference, forgive, dry run,
+an unreadable ledger, other sources' workstreams untouched — a monorepo
+worktree with a subdir code dir (seeds at the root, dirty guard and removal
+through git, `--subdir` validation), the service layer's store-only paths,
+and the HTTP API end to end against a temp store without sway). The
 sway mechanics are covered by `make poc` and `make poc-lot`; `make ui-shot`
 renders the UI headlessly (list + detail) and fails on console errors.
 
@@ -968,10 +1052,12 @@ renders the UI headlessly (list + detail) and fails on console errors.
 - **A sway restart loses the windows** (not the files): juggler rebuilds a
   workstream the next time you show it and `opencode -s <pinned id>` resumes
   the conversation.
-- **Only Jira has a connector.** PR refs are still entered by hand; a GitHub
-  connector (branch → PR, status, review state — the data `merger` already
-  tracks) is the obvious next source, and the `Connector`/`Snapshot` seam is
-  made for it: a connector is one file plus a fake-server test.
+- **The GitHub source knows state, not health.** A `pr` ref says open /
+  draft / merged / closed and its title; review decisions, CI checks and
+  mergeability (what `merger` tracks) are not pulled yet — the ref would
+  grow fields, the connector a few requests. PRs are found by branch, so a
+  PR opened from a branch the workstream is not on must still be `jug ref
+  add`ed once (it is refreshed from then on).
 - **A sync creates a workstream for every ticket it selects** — with
   `assignee = "any"` that is the whole sprint, 46 directories for a
   46-ticket sprint. They are cheap (three files) and hidden by *mine only*,

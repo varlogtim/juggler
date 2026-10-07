@@ -9,14 +9,23 @@
 //     board", "my personal GitHub issues" — named by the user in config
 //     (`[sources.<name>]`). One connector can back many sources.
 //
-// A source does one thing: Pull. Given the keys the store already knows
-// from it, it returns a Snapshot — the groups it manages (a sprint, with
-// dates and the link to its board) and the items it found (tickets, with
-// their identity ref, state and group membership). The source never touches
-// the store; turning a snapshot into workstreams is the sync's job
-// (internal/app, Sync), which also owns the rules about what may be
-// overwritten. That split keeps connectors small and testable with a fake
-// server, and the reconciliation rules in one place for every connector.
+// A source does one thing: Pull. Given an Inventory of what the store
+// already has (the keys it knows from this source, and a view of every
+// workstream), it returns a Snapshot — the groups it manages (a sprint,
+// with dates and the link to its board), the items it found (tickets, with
+// their identity ref, state and group membership), and ref updates for
+// workstreams that already exist (a pull request's state, matched to the
+// workstream on that branch). The source never touches the store; turning
+// a snapshot into workstreams is the sync's job (internal/app, Sync), which
+// also owns the rules about what may be overwritten. That split keeps
+// connectors small and testable with a fake server, and the reconciliation
+// rules in one place for every connector.
+//
+// Two kinds of content, deliberately distinct: an Item is an IDENTITY — a
+// ticket — and may become a workstream; a RefUpdate is a FACT ABOUT an
+// existing workstream — its PR is merged — and never creates one. A ticket
+// can have several PRs (a fix and its backport), so a PR is not an
+// identity.
 package source
 
 import (
@@ -59,12 +68,51 @@ type Source interface {
 	Poll() time.Duration
 	// Describe is one line for `jug source ls`: what this source watches.
 	Describe() string
-	// Pull fetches the current picture. known lists the identity keys the
-	// store already attributes to this source; the source should include
-	// their current state even when they no longer match its queries, so
-	// finished work keeps its final status. Items for known keys that the
-	// queries no longer select are returned with Discovered=false.
-	Pull(ctx context.Context, known []string) (*Snapshot, error)
+	// Pull fetches the current picture. inv.Known lists the identity keys
+	// the store already attributes to this source; the source should
+	// include their current state even when they no longer match its
+	// queries, so finished work keeps its final status. Items for known
+	// keys that the queries no longer select are returned with
+	// Discovered=false. inv.Workstreams is for connectors that annotate
+	// existing workstreams (pull requests for their branches).
+	Pull(ctx context.Context, inv Inventory) (*Snapshot, error)
+}
+
+// Inventory is what the store already has, as a source may need it.
+type Inventory struct {
+	// Known: identity keys the store attributes to this source (its items'
+	// keys, and keys in its ledger).
+	Known []string
+	// Workstreams: every workstream, read-only, as much as a connector needs
+	// to match external facts to it.
+	Workstreams []WorkstreamView
+}
+
+// WorkstreamView is a workstream as a connector sees it.
+type WorkstreamView struct {
+	Name string      `json:"name"`
+	ID   string      `json:"id"`
+	Refs []store.Ref `json:"refs"`
+	// Branch, Remote and DefaultBranch describe its checkout: the branch
+	// checked out, the URL of the main checkout's remote, and that remote's
+	// default branch — all "" when it has no code, or none in git. A
+	// workstream on the default branch (a shared main checkout) has no
+	// branch of its own for a connector to look up.
+	Branch        string `json:"branch,omitempty"`
+	Remote        string `json:"remote,omitempty"`
+	DefaultBranch string `json:"default_branch,omitempty"`
+	// Live: it has windows or a session — work that is being looked at.
+	Live bool `json:"live"`
+}
+
+// Ref returns the view's ref of the given type with key, or nil.
+func (v WorkstreamView) Ref(typ, key string) *store.Ref {
+	for i := range v.Refs {
+		if v.Refs[i].Type == typ && v.Refs[i].Key == key {
+			return &v.Refs[i]
+		}
+	}
+	return nil
 }
 
 // Snapshot is one pull's result.
@@ -76,9 +124,23 @@ type Snapshot struct {
 	// as owned by this source when (re)tagging.
 	Groups []Group `json:"groups"`
 	Items  []Item  `json:"items"`
+	// Refs are facts about existing workstreams: a ref to set or refresh
+	// on a named workstream. The sync replaces a ref of the same type and
+	// key (or URL) and never creates a workstream for one.
+	Refs []RefUpdate `json:"refs,omitempty"`
 	// Notes are human-readable remarks about the pull (what was queried,
 	// what was skipped) for `jug sync` output and the log.
 	Notes []string `json:"notes,omitempty"`
+}
+
+// RefUpdate sets or refreshes one ref on an existing workstream.
+type RefUpdate struct {
+	// Workstream is the canonical name (WorkstreamView.Name) to apply to.
+	Workstream string `json:"workstream"`
+	// Ref carries type, key, URL, title and status; the sync stamps Updated.
+	Ref store.Ref `json:"ref"`
+	// Closed: the external thing is finished (a PR merged or closed).
+	Closed bool `json:"closed"`
 }
 
 // Group is a managed group with its metadata.

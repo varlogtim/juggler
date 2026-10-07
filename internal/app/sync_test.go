@@ -21,6 +21,7 @@ type fakeSource struct {
 	name  string
 	snap  *source.Snapshot
 	known []string
+	inv   source.Inventory
 	err   error
 }
 
@@ -28,8 +29,9 @@ func (f *fakeSource) Name() string        { return f.name }
 func (f *fakeSource) Kind() string        { return "fake" }
 func (f *fakeSource) Poll() time.Duration { return 0 }
 func (f *fakeSource) Describe() string    { return "fake" }
-func (f *fakeSource) Pull(_ context.Context, known []string) (*source.Snapshot, error) {
-	f.known = known
+func (f *fakeSource) Pull(_ context.Context, inv source.Inventory) (*source.Snapshot, error) {
+	f.known = inv.Known
+	f.inv = inv
 	return f.snap, f.err
 }
 
@@ -251,6 +253,64 @@ func TestSecretAndSourceKinds(t *testing.T) {
 }
 
 func configSecret(ref string) (string, error) { return configSecretFn(ref) }
+
+// Ref updates annotate existing workstreams and never create one; the
+// inventory a connector gets describes every workstream.
+func TestSyncRefUpdates(t *testing.T) {
+	a := newApp(t)
+	ctx := context.Background()
+	w, _ := a.Create(CreateOptions{Desc: "fix", Jira: "T-1"})
+	a.AddRef(w, "pr", "https://gh.example.com/o/r/pull/7", "old title", "open")
+	w2, _ := a.Create(CreateOptions{Desc: "notes only"})
+	pr := func(ws, key, url, title, status string, closed bool) source.RefUpdate {
+		return source.RefUpdate{Workstream: ws, Ref: store.Ref{Type: "pr", Key: key, URL: url, Title: title, Status: status}, Closed: closed}
+	}
+	src := &fakeSource{name: "gh", snap: &source.Snapshot{Source: "gh", Refs: []source.RefUpdate{
+		pr(w.Name(), "o/r#7", "https://gh.example.com/o/r/pull/7", "fix the thing", "merged", true), // replace by key
+		pr(w2.Name(), "o/r#8", "https://gh.example.com/o/r/pull/8", "new one", "draft", false),      // append
+		pr("nope", "o/r#9", "https://gh.example.com/o/r/pull/9", "", "open", false),                 // unknown workstream
+	}}}
+	rep, err := a.Sync(ctx, src, SyncOptions{DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(rep.Refs, ",") != w.ID+" o/r#7,"+w2.ID+" o/r#8" || len(rep.Errors) != 1 || len(rep.Created) != 0 {
+		t.Fatalf("dry run: %+v", rep)
+	}
+	if got, _ := a.Resolve("T-1"); got.Ref("pr").Status != "open" {
+		t.Fatal("dry run wrote")
+	}
+	// the inventory carried every workstream with its refs
+	if len(src.inv.Workstreams) != 2 || src.inv.Workstreams[0].Ref("pr", "o/r#7") == nil && src.inv.Workstreams[1].Ref("pr", "o/r#7") == nil {
+		t.Fatalf("inventory: %+v", src.inv.Workstreams)
+	}
+	rep, _ = a.Sync(ctx, src, SyncOptions{})
+	if len(rep.Refs) != 2 || !strings.Contains(rep.Summary(), "2 refs refreshed") {
+		t.Fatalf("real run: %+v", rep)
+	}
+	w, _ = a.Resolve("T-1")
+	r := w.Ref("pr")
+	if r.Title != "fix the thing" || r.Status != "merged" || !r.Closed || r.Updated.IsZero() || len(w.Refs) != 2 {
+		t.Fatalf("replaced ref: %+v", w.Refs)
+	}
+	if w.Source != "" || w.Finished() { // a ref source does not own the workstream, and a merged PR is not "finished"
+		t.Fatalf("source=%q finished=%v", w.Source, w.Finished())
+	}
+	w2, _ = a.Load(w2.Name())
+	if r := w2.Ref("pr"); r == nil || r.Key != "o/r#8" || r.Status != "draft" {
+		t.Fatalf("appended ref: %+v", w2.Refs)
+	}
+	// same facts again: nothing to do
+	rep, _ = a.Sync(ctx, src, SyncOptions{})
+	if len(rep.Refs) != 0 || rep.Unchanged != 2 {
+		t.Fatalf("idempotent: %+v", rep)
+	}
+	// a ref source never creates workstreams and never owns any
+	l, _ := a.LoadLedger("gh")
+	if len(l.Owned) != 0 {
+		t.Fatalf("ledger owned: %v", l.Owned)
+	}
+}
 
 // An unreadable ledger must stop the sync (it is the source's memory of what
 // it owns) and be visible in the source's status, not read as "owns nothing".
