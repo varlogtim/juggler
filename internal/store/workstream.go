@@ -170,8 +170,7 @@ func (w *Workstream) Untouched() bool {
 	if w.CodeDir != "" || w.OpencodeSession != "" || !w.Completed.IsZero() {
 		return false
 	}
-	b, err := os.ReadFile(w.TodoPath())
-	if err != nil || string(b) != defaultTodo(w) {
+	if !w.hasDefaultTodo() {
 		return false
 	}
 	entries, err := os.ReadDir(w.NotesDir())
@@ -276,6 +275,17 @@ func (s Store) Save(w *Workstream) error {
 func DefaultTodo(w *Workstream) string { return defaultTodo(w) }
 
 func defaultTodo(w *Workstream) string {
+	// a heading and nothing else: the list is yours to write. No seeded
+	// items, so an open-todo count means something was actually noted.
+	return fmt.Sprintf("# %s — %s\n\n", w.ID, w.Desc)
+}
+
+// legacyTodo is the template that preceded defaultTodo: three sections
+// (Leadership, Code, Follow-ups) with five seeded items. Workstreams made
+// before the change still carry it when nobody edited it, so Untouched
+// has to recognize it too, or a source's leftovers would stop being
+// prunable the moment the template changed.
+func legacyTodo(w *Workstream) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# %s — %s\n\n", w.ID, w.Desc)
 	b.WriteString("Three interfaces have to agree before this is done:\n\n")
@@ -283,6 +293,16 @@ func defaultTodo(w *Workstream) string {
 	b.WriteString("## Code (PR)\n\n- [ ] PR up\n- [ ] CI green\n- [ ] reviewed\n- [ ] merged\n\n")
 	b.WriteString("## Follow-ups (things found on the way)\n\n")
 	return b.String()
+}
+
+// hasDefaultTodo reports whether TODO.md is still a template — the
+// current one or the one before it — i.e. nobody has written in it.
+func (w *Workstream) hasDefaultTodo() bool {
+	b, err := os.ReadFile(w.TodoPath())
+	if err != nil {
+		return false
+	}
+	return string(b) == defaultTodo(w) || string(b) == legacyTodo(w)
 }
 
 // Resolve finds a workstream by canonical name, id, or unique prefix of

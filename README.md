@@ -58,7 +58,7 @@ named `<category>_<id>_<short-desc>`:
 ~/workstreams/
   work_AISW-53270_disagg-toggle-requires-pause/
     workstream.toml      id, category, description, code dir, refs
-    TODO.md              the three interfaces that must agree before it's done
+    TODO.md              the workstream's checklist (- [ ] items; the count shows in the bar)
     notes/               dictation and free-form notes
   personal_tim-0001_juggler-dev/
 ```
@@ -363,11 +363,13 @@ fresh titled session; `jug session pin ID` pins an id you know.
 
 ### UC8 — Keep the workstream's own to-do list
 
-`$mod+w` → *notes* opens `TODO.md`. It starts with three sections — **Leadership
-(ticket)**, **Code (PR)**, **Follow-ups** — because a workstream is only done
-when all three agree: the ticket says what leadership expects, the PR is
-merged, and the things you found along the way have their own tickets. The
-picker and the bar show the count of open `- [ ]` items.
+`$mod+w` → *notes* opens `TODO.md`. A new workstream's is just a heading
+(`# AISW-53270 — disagg toggle requires pause`) — the list is yours to
+write, in whatever shape the work needs. The picker, `jug ls` and the bar
+count the open `- [ ]` items (and say nothing while there are none); a
+`- [x]` is done. Nothing else reads the file: sections, a log, links are
+all fine. A TODO.md that is still the bare heading is one thing that keeps
+a synced workstream *untouched*, and so prunable (see Sources).
 
 ### UC9 — Dictate notes into the workstream
 
@@ -473,9 +475,9 @@ the workstream directory — notes included, so archive first if you want them.
 
 ```
 ● AISW-53270  disagg toggle requires pause  Blocked  PR#897 open  todo:2  work
-◐ AISW-52787  deprecate all projects        Blocked  PR#895 open  todo:5  work
-○ AISW-52932  reduce db round trips …       New                   todo:5  work
-○ tim-0001    juggler dev                                         todo:5  personal
+◐ AISW-52787  deprecate all projects        Blocked  PR#895 open  todo:3  work
+○ AISW-52932  reduce db round trips …       New                           work
+○ tim-0001    juggler dev                                         todo:4  personal
 + new workstream…
 ```
 
@@ -729,7 +731,7 @@ Do not put it behind a reverse proxy.
   "refs": [{ "type": "jira", "key": "AISW-53270", "url": "https://…/browse/AISW-53270", "status": "Blocked" }],
   "groups": ["PCFS-S20-26.09.23-Nebula"], "source": "nebula", "owner": "",
   "ticket_closed": false, "completed": "", "finished": false,
-  "opencode_session": "ses_…", "state": "parked", "todos_open": 5, "shown": "2026-10-05T12:00:00-04:00",
+  "opencode_session": "ses_…", "state": "parked", "todos_open": 2, "shown": "2026-10-05T12:00:00-04:00",
   "git": { "root": "/home/me/workstreams/…/src/ezaddon-mlis", "branch": "tim/aisw-53270-…", "head": "48faeb67", "dirty": false, "linked": true, "main": "/home/me/src/ezaddon-mlis", "upstream": "origin/…", "ahead": 0, "behind": 0 } }
 ```
 
@@ -937,9 +939,9 @@ that are not hotkeys.
 | # | UC | do | expect |
 |---|---|---|---|
 | 1 | — | `jug doctor` | every line `ok`; workspaces listed as `N:label` |
-| 2 | UC10 | `jug add --category personal --code-dir <some git checkout> "juggler dev"`; `jug ls` | a `personal_tim-NNNN_juggler-dev/` dir with `workstream.toml`, `TODO.md`, `notes/`; `ls` shows it with `TODO 5` |
+| 2 | UC10 | `jug add --category personal --code-dir <some git checkout> "juggler dev"`; `jug ls` | a `personal_tim-NNNN_juggler-dev/` dir with `workstream.toml`, `TODO.md` (one heading line, no items), `notes/`; `ls` shows it with `TODO 0` |
 | 3 | UC1 | go to an empty workspace (e.g. `$mod+6`), `$mod+Shift+t` | bar label becomes `WS`; notification "workspace 6 is now the workstream slot"; the bar shows `WS — (Super+t to pick)` |
-| 4 | UC2 | `$mod+t`, type `jug`, Enter | left ⅓: opencode running in the code dir **on a new session titled `tim-NNNN: juggler dev`** (`jug session` shows it; `workstream.toml` has `opencode_session`); right ⅔: a terminal in the same dir; focus on opencode; bar: `WS tim-NNNN · juggler dev · todo 5` |
+| 4 | UC2 | `$mod+t`, type `jug`, Enter | left ⅓: opencode running in the code dir **on a new session titled `tim-NNNN: juggler dev`** (`jug session` shows it; `workstream.toml` has `opencode_session`); right ⅔: a terminal in the same dir; focus on opencode; bar: `WS tim-NNNN · juggler dev` (no todo count until you add a `- [ ]`) |
 | 5 | UC7b | `jug session pick --ws <ws> --all`, choose another session, then `$mod+w` → *opencode* | the pin changed (`jug session`); after `jug session --relaunch` (or closing opencode and `$mod+w` → *term*) the left stack runs `opencode -s <that id>` (`pgrep -af "opencode -s"`) and shows that conversation |
 | 6 | UC4 | `$mod+l` (right stack), `$mod+Return` twice, `$mod+k`/`$mod+j` | two more terminals stacked on the right; focus walks the stack; `$mod+h` jumps back to opencode |
 | 7 | UC5 | `$mod+w`, press `j` on a workstream with a jira ref (or `jug open https://example.com`) | a floating menu lists only applicable rows with the workstream id as title; the single key acts (no Enter); a browser window joins the right stack and is focused |
