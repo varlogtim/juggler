@@ -16,7 +16,7 @@
 //	jql           = ""                             # extra filter ANDed to every scope, e.g. "project = AISW AND issuetype != Epic"
 //	category      = "work"                         # category for created workstreams
 //	backlog_group = "backlog"                      # group for tickets in no (open) sprint; "" = don't tag
-//	poll          = "5m"                           # scheduler interval; "0" = manual only
+//	poll          = "1h"                           # scheduler interval; "0" = manual only
 //	sprint_field  = ""                             # custom field id; discovered when empty
 //	group_url     = ""                             # template for a sprint's link; see sprintURL
 package jira
@@ -75,7 +75,7 @@ type Source struct {
 
 // Open implements source.Connector.
 func (connector) Open(name string, decode func(any) error, env source.Env) (source.Source, error) {
-	cfg := Config{Scope: []string{"open", "sprint"}, Assignee: "me", Category: env.DefaultCategory, BacklogGroup: "backlog", Poll: "5m"}
+	cfg := Config{Scope: []string{"open", "sprint"}, Assignee: "me", Category: env.DefaultCategory, BacklogGroup: "backlog", Poll: "1h"}
 	if cfg.Category == "" || cfg.Category == "personal" {
 		cfg.Category = "work"
 	}
@@ -109,7 +109,7 @@ func (connector) Open(name string, decode func(any) error, env source.Env) (sour
 	if strings.TrimSpace(cfg.Assignee) == "" {
 		errs = append(errs, `assignee must be "me", "any" or a JQL value`)
 	}
-	poll := 5 * time.Minute
+	poll := time.Hour
 	if cfg.Poll != "" {
 		d, err := time.ParseDuration(cfg.Poll)
 		if err != nil || d < 0 {
@@ -185,7 +185,8 @@ func (s *Source) prepare(ctx context.Context) error {
 }
 
 // Pull implements source.Source.
-func (s *Source) Pull(ctx context.Context, known []string) (*source.Snapshot, error) {
+func (s *Source) Pull(ctx context.Context, inv source.Inventory) (*source.Snapshot, error) {
+	known := inv.Known
 	if err := s.prepare(ctx); err != nil {
 		return nil, err
 	}

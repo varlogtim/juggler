@@ -21,15 +21,39 @@ type WorktreeOptions struct {
 	Branch  string // "" = DefaultBranch(w)
 	Base    string // "" = the repo's default_branch, else the remote's HEAD
 	NoFetch bool
+	// Subdir is where windows start inside the worktree (a component of a
+	// monorepo): "" = the repo's configured subdir, "." = the worktree root.
+	Subdir string
 }
 
 // WorktreeResult says what AddWorktree did.
 type WorktreeResult struct {
-	Repo   string   `json:"repo"`
-	Branch string   `json:"branch"`
-	Path   string   `json:"path"`
-	What   string   `json:"what"`   // one line: "worktree on new branch X from origin/develop"
-	Seeded []string `json:"seeded"` // files copied from the seed dir
+	Repo    string   `json:"repo"`
+	Branch  string   `json:"branch"`
+	Path    string   `json:"path"`     // the worktree root
+	CodeDir string   `json:"code_dir"` // where windows start: Path, or a subdir of it
+	What    string   `json:"what"`     // one line: "worktree on new branch X from origin/develop"
+	Seeded  []string `json:"seeded"`   // files copied from the seed dir
+}
+
+// CleanSubdir normalizes a subdir option: "" and "." mean the root; the
+// result is a clean relative path that stays inside the worktree.
+func CleanSubdir(sub string) (string, error) {
+	sub = strings.TrimSpace(sub)
+	if sub == "" {
+		return "", nil
+	}
+	if filepath.IsAbs(sub) {
+		return "", fmt.Errorf("%w: subdir %q must be relative to the worktree", ErrInvalid, sub)
+	}
+	c := filepath.Clean(sub)
+	if c == "." {
+		return "", nil
+	}
+	if c == ".." || strings.HasPrefix(c, "../") {
+		return "", fmt.Errorf("%w: subdir %q leaves the worktree", ErrInvalid, sub)
+	}
+	return c, nil
 }
 
 var ticketID = regexp.MustCompile(`^[A-Z][A-Z0-9]+-[0-9]+$`)
@@ -52,7 +76,8 @@ type RepoInfo struct {
 	Name          string `json:"name"`
 	Path          string `json:"path"`
 	Remote        string `json:"remote"`
-	DefaultBranch string `json:"default_branch"` // "" = the remote's HEAD
+	DefaultBranch string `json:"default_branch"`   // "" = the remote's HEAD
+	Subdir        string `json:"subdir,omitempty"` // default code dir inside a new worktree
 	SeedDir       string `json:"seed_dir,omitempty"`
 	OK            bool   `json:"ok"` // Path is a git checkout
 }
@@ -61,7 +86,7 @@ type RepoInfo struct {
 func (a *App) Repos() []RepoInfo {
 	var out []RepoInfo
 	for name, r := range a.Cfg.Repos {
-		out = append(out, RepoInfo{Name: name, Path: r.Path, Remote: r.Remote, DefaultBranch: r.DefaultBranch, SeedDir: a.Cfg.SeedDirFor(name), OK: gitwt.IsRepo(r.Path)})
+		out = append(out, RepoInfo{Name: name, Path: r.Path, Remote: r.Remote, DefaultBranch: r.DefaultBranch, Subdir: r.Subdir, SeedDir: a.Cfg.SeedDirFor(name), OK: gitwt.IsRepo(r.Path)})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
@@ -100,7 +125,8 @@ func (a *App) ResolveRepo(q string) (name, mainRepo, remote, base string, err er
 }
 
 // AddWorktree creates <ws>/<code_subdir>/<repo> as a linked worktree, points
-// code_dir at it and copies the repo's seed files in.
+// code_dir at it (or at the chosen subdir inside it) and copies the repo's
+// seed files into the worktree root.
 func (a *App) AddWorktree(w *store.Workstream, o WorktreeOptions) (WorktreeResult, error) {
 	var res WorktreeResult
 	if w.CodeInside() {
@@ -117,19 +143,56 @@ func (a *App) AddWorktree(w *store.Workstream, o WorktreeOptions) (WorktreeResul
 	if branch == "" {
 		branch = DefaultBranch(w)
 	}
+	subdir := o.Subdir
+	if subdir == "" {
+		subdir = a.Cfg.Repos[name].Subdir
+	}
+	if subdir, err = CleanSubdir(subdir); err != nil {
+		return res, err
+	}
 	rel := filepath.Join(a.Cfg.CodeSubdir, name)
 	path := filepath.Join(w.Dir, rel)
 	what, err := gitwt.Add(mainRepo, path, branch, gitwt.AddOptions{Remote: remote, Base: base, Fetch: !o.NoFetch})
 	if err != nil {
 		return res, err
 	}
-	w.CodeDir = rel
+	if subdir != "" {
+		if fi, err := os.Stat(filepath.Join(path, subdir)); err != nil || !fi.IsDir() {
+			// a subdir that is not in this branch: undo the fresh worktree
+			// rather than leave code_dir pointing at nothing (the branch is kept)
+			_ = gitwt.Remove(path, true, nil)
+			return res, fmt.Errorf("%w: %s has no directory %s (checked out from %s)", ErrInvalid, name, subdir, branch)
+		}
+	}
+	w.CodeDir = filepath.Join(rel, subdir)
 	if err := a.Store.Save(w); err != nil {
 		return res, err
 	}
-	res = WorktreeResult{Repo: name, Branch: branch, Path: path, What: what}
-	res.Seeded, err = a.seedInto(w, name, false)
+	res = WorktreeResult{Repo: name, Branch: branch, Path: path, CodeDir: w.ResolvedCodeDir(), What: what}
+	res.Seeded, err = a.seedInto(w, name, path, false)
 	return res, err
+}
+
+// WorktreeRoot returns the top of w's own linked worktree — the directory
+// `git worktree add` created inside the workstream — and whether it has
+// one. code_dir may point below it (a component inside a monorepo):
+// windows start there, but seeds, the dirty check and removal address the
+// worktree itself.
+func (a *App) WorktreeRoot(w *store.Workstream) (string, bool) {
+	if !w.CodeInside() {
+		return "", false
+	}
+	// a code dir that no longer exists (its subdir was renamed upstream)
+	// still has a worktree above it: ask git from the nearest ancestor
+	dir := w.ResolvedCodeDir()
+	for !isDir(dir) && within(w.Dir, dir) && dir != w.Dir {
+		dir = filepath.Dir(dir)
+	}
+	top, err := gitwt.Toplevel(dir)
+	if err != nil || !within(w.Dir, top) || !gitwt.IsLinkedWorktree(top) {
+		return "", false
+	}
+	return top, true
 }
 
 // Seed (re)copies the repo's seed files into w's worktree.
@@ -138,17 +201,22 @@ func (a *App) Seed(w *store.Workstream, force bool) ([]string, error) {
 	if name == "" || a.Cfg.SeedDirFor(name) == "" {
 		return nil, fmt.Errorf("no seed dir for %s (expected %s)", w.ID, filepath.Join(filepath.Dir(config.Path()), "seed", name))
 	}
-	return a.seedInto(w, name, force)
+	root, ok := a.WorktreeRoot(w)
+	if !ok {
+		return nil, fmt.Errorf("%s has no worktree of its own to seed (code dir %s)", w.ID, w.ResolvedCodeDir())
+	}
+	return a.seedInto(w, name, root, force)
 }
 
-// seedInto copies the seed files (templated) and trusts a seeded .envrc.
-func (a *App) seedInto(w *store.Workstream, repoName string, force bool) ([]string, error) {
+// seedInto copies the seed files (templated) into the worktree root and
+// trusts a seeded .envrc there; direnv applies it to the code dir below.
+func (a *App) seedInto(w *store.Workstream, repoName, root string, force bool) ([]string, error) {
 	sd := a.Cfg.SeedDirFor(repoName)
 	if sd == "" {
 		return nil, nil
 	}
 	home, _ := os.UserHomeDir()
-	written, err := seed.Apply(sd, w.ResolvedCodeDir(), seed.Vars{
+	written, err := seed.Apply(sd, root, seed.Vars{
 		ID: w.ID, Name: w.Name(), Repo: repoName, Dir: w.Dir, CodeDir: w.ResolvedCodeDir(), Home: home,
 	}, force)
 	if err != nil {
@@ -156,12 +224,24 @@ func (a *App) seedInto(w *store.Workstream, repoName string, force bool) ([]stri
 	}
 	for _, rel := range written {
 		if rel == ".envrc" {
-			if err := seed.DirenvAllow(w.ResolvedCodeDir()); err != nil {
+			if err := seed.DirenvAllow(root); err != nil {
 				return written, err
 			}
 		}
 	}
 	return written, nil
+}
+
+// isDir reports whether p is an existing directory.
+func isDir(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && fi.IsDir()
+}
+
+// within reports whether p is dir or below it (lexically).
+func within(dir, p string) bool {
+	rel, err := filepath.Rel(dir, p)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, "../")
 }
 
 // SeedPaths lists the relative paths the repo's seed dir would put into w's
@@ -200,6 +280,7 @@ func (a *App) RepoNameOf(w *store.Workstream) string {
 
 // GitInfo is the code dir's git state (nil when it is not a checkout).
 type GitInfo struct {
+	Root     string `json:"root"` // the checkout's top; the code dir when there is no subdir
 	Branch   string `json:"branch"`
 	Head     string `json:"head"`
 	Dirty    bool   `json:"dirty"`
@@ -216,7 +297,7 @@ func (a *App) Git(w *store.Workstream) *GitInfo {
 	if err != nil {
 		return nil
 	}
-	return &GitInfo{Branch: in.Branch, Head: in.Head, Dirty: in.Dirty, Linked: in.Linked, Main: in.Main, Upstream: in.Upstream, Ahead: in.Ahead, Behind: in.Behind}
+	return &GitInfo{Root: in.Root, Branch: in.Branch, Head: in.Head, Dirty: in.Dirty, Linked: in.Linked, Main: in.Main, Upstream: in.Upstream, Ahead: in.Ahead, Behind: in.Behind}
 }
 
 // RemovePlan is what Remove would do.
@@ -232,13 +313,12 @@ type RemovePlan struct {
 // Plan describes the effect of removing w.
 func (a *App) Plan(w *store.Workstream) RemovePlan {
 	p := RemovePlan{Name: w.Name(), Dir: w.Dir}
-	code := w.ResolvedCodeDir()
-	if w.CodeInside() && gitwt.IsLinkedWorktree(code) {
-		p.HasWorktree, p.Worktree = true, code
-		if in, err := gitwt.Inspect(code); err == nil {
+	if root, ok := a.WorktreeRoot(w); ok {
+		p.HasWorktree, p.Worktree = true, root
+		if in, err := gitwt.Inspect(root); err == nil {
 			p.Branch = in.Branch
 		}
-		if changes, _ := gitwt.Changes(code); len(changes) > 0 {
+		if changes, _ := gitwt.Changes(root); len(changes) > 0 {
 			exp := map[string]bool{}
 			for _, s := range a.SeedPaths(w) {
 				exp[s] = true
@@ -257,14 +337,14 @@ func (a *App) Plan(w *store.Workstream) RemovePlan {
 // ErrDirty is gitwt.ErrDirty, re-exported for callers.
 var ErrDirty = gitwt.ErrDirty
 
-// removeFiles removes w's worktree (through git) and its directory. Windows
-// must already be closed.
+// removeFiles removes w's worktree (through git, so the main checkout
+// forgets it and the branch is freed) and its directory. Windows must
+// already be closed.
 func (a *App) removeFiles(w *store.Workstream, force bool) error {
-	code := w.ResolvedCodeDir()
-	if w.CodeInside() && gitwt.IsLinkedWorktree(code) {
-		if err := gitwt.Remove(code, force, a.SeedPaths(w)); err != nil {
+	if root, ok := a.WorktreeRoot(w); ok {
+		if err := gitwt.Remove(root, force, a.SeedPaths(w)); err != nil {
 			if errors.Is(err, gitwt.ErrDirty) {
-				return fmt.Errorf("%s: %w (commit or stash, or force)", code, err)
+				return fmt.Errorf("%s: %w (commit or stash, or force)", root, err)
 			}
 			return err
 		}

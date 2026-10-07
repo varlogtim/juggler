@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/varlogtim/juggler/internal/config"
+	"github.com/varlogtim/juggler/internal/gitwt"
 	"github.com/varlogtim/juggler/internal/layout"
 	"github.com/varlogtim/juggler/internal/source"
 	"github.com/varlogtim/juggler/internal/store"
@@ -47,6 +48,10 @@ import (
 //   - Nothing is ever deleted by a sync. Workstreams the source made that it
 //     no longer selects (or that finished) and that you never touched are
 //     reported as PRUNABLE; `jug source prune` removes those, on request.
+//   - A snapshot's REF UPDATES (a pull request's state, matched by the
+//     connector to the workstream on that branch) replace the ref of the
+//     same type and key — exactly what `jug ref add` does — on any
+//     workstream, whoever made it. They never create or adopt one.
 //
 // Everything a sync writes it also records in the per-source ledger
 // (<state>/sync/<source>.json): keys it owns, keys it must not recreate,
@@ -71,6 +76,7 @@ type Report struct {
 	Tombstone []string `json:"tombstoned,omitempty"` // removed by the user, not recreated
 	Finished  []string `json:"finished,omitempty"`   // selected but already finished: no workstream made
 	Prunable  []string `json:"prunable,omitempty"`   // owned, untouched, no longer selected or finished: `jug source prune`
+	Refs      []string `json:"refs,omitempty"`       // "<ws id> <ref key>" refs set or refreshed
 	Unchanged int      `json:"unchanged"`
 	Errors    []string `json:"errors,omitempty"`
 }
@@ -88,6 +94,7 @@ func (r Report) Summary() string {
 	add(len(r.Updated), "updated")
 	add(len(r.Regrouped), "regrouped")
 	add(len(r.Tombstone), "tombstoned")
+	add(len(r.Refs), "refs refreshed")
 	add(len(r.GroupsRegistered), "groups registered")
 	add(len(r.GroupsUpdated), "groups updated")
 	add(len(r.Errors), "errors")
@@ -385,7 +392,7 @@ func (a *App) Sync(ctx context.Context, src source.Source, opt SyncOptions) (*Re
 
 	snap := opt.Snapshot
 	if snap == nil {
-		snap, err = src.Pull(ctx, known)
+		snap, err = src.Pull(ctx, source.Inventory{Known: known, Workstreams: a.inventory(all)})
 		if err != nil {
 			return finish(err)
 		}
@@ -550,11 +557,38 @@ func (a *App) Sync(ctx context.Context, src source.Source, opt SyncOptions) (*Re
 			}
 		}
 	}
+	// 3. ref updates -> existing workstreams (any source's, or none)
+	byName := map[string]*store.Workstream{}
+	for _, w := range all {
+		byName[w.Name()] = w
+	}
+	for _, ru := range snap.Refs {
+		w := byName[ru.Workstream]
+		if w == nil {
+			rep.Errors = append(rep.Errors, fmt.Sprintf("ref %s: no workstream %q", ru.Ref.Key, ru.Workstream))
+			continue
+		}
+		if ru.Ref.Type == "" || (ru.Ref.Key == "" && ru.Ref.URL == "") {
+			rep.Errors = append(rep.Errors, fmt.Sprintf("%s: ref without type/key: %+v", w.ID, ru.Ref))
+			continue
+		}
+		if !applyRef(w, ru) {
+			rep.Unchanged++
+			continue
+		}
+		rep.Refs = append(rep.Refs, w.ID+" "+ru.Ref.Key)
+		if !opt.DryRun {
+			if err := a.Store.Save(w); err != nil {
+				rep.Errors = append(rep.Errors, fmt.Sprintf("%s: %v", w.ID, err))
+			}
+		}
+	}
+
 	if !opt.DryRun {
 		ledger.LastSelected = uniqueSorted(selected)
 	}
 	rep.Prunable = a.prunable(src.Name(), all, uniqueSorted(selected))
-	for _, l := range [][]string{rep.Created, rep.Adopted, rep.Updated, rep.Regrouped, rep.Tombstone, rep.Finished, rep.GroupsRegistered, rep.GroupsUpdated} {
+	for _, l := range [][]string{rep.Created, rep.Adopted, rep.Updated, rep.Regrouped, rep.Tombstone, rep.Finished, rep.Refs, rep.GroupsRegistered, rep.GroupsUpdated} {
 		sort.Strings(l)
 	}
 	return finish(nil)
@@ -660,6 +694,86 @@ func (a *App) Prune(e *layout.Engine, src string, dryRun bool) ([]string, []stri
 		}
 	}
 	return removed, skipped, nil
+}
+
+// inventory is the read-only view of every workstream a connector gets.
+func (a *App) inventory(all []*store.Workstream) []source.WorkstreamView {
+	st, _ := store.LoadState(a.Cfg.StateDir)
+	views := make([]source.WorkstreamView, 0, len(all))
+	for _, w := range all {
+		v := source.WorkstreamView{Name: w.Name(), ID: w.ID, Refs: append([]store.Ref(nil), w.Refs...), Live: w.OpencodeSession != ""}
+		if st != nil && st.Streams[w.Name()] != nil && len(st.Streams[w.Name()].Windows) > 0 {
+			v.Live = true
+		}
+		if w.CodeDir != "" {
+			if in, err := gitwt.Inspect(w.ResolvedCodeDir()); err == nil && in.Main != "" {
+				v.Branch = in.Branch
+				v.Remote, v.DefaultBranch = a.remoteOf(in.Main)
+			}
+		}
+		views = append(views, v)
+	}
+	return views
+}
+
+// remoteOf returns the remote URL and default branch of a main checkout,
+// per its [repos.*] entry when it has one (remote name, default_branch),
+// else origin and its HEAD. Cached per process: git is asked once per repo.
+func (a *App) remoteOf(mainRepo string) (string, string) {
+	remoteMu.Lock()
+	defer remoteMu.Unlock()
+	if r, ok := remoteCache[mainRepo]; ok {
+		return r.url, r.branch
+	}
+	remote, def := "origin", ""
+	for _, r := range a.Cfg.Repos {
+		if r.Path == mainRepo {
+			if r.Remote != "" {
+				remote = r.Remote
+			}
+			def = r.DefaultBranch
+		}
+	}
+	url := gitwt.RemoteURL(mainRepo, remote)
+	if def == "" && url != "" {
+		def = gitwt.DefaultBranch(mainRepo, remote)
+	}
+	remoteCache[mainRepo] = remoteInfo{url, def}
+	return url, def
+}
+
+// remoteInfo is what remoteOf remembers per main checkout.
+type remoteInfo struct{ url, branch string }
+
+// remoteCache: main checkout path -> its remote URL and default branch.
+// Process-wide because a checkout's remote does not change while juggler
+// runs; `jug serve` asks git once per repo, not once per poll.
+var (
+	remoteMu    sync.Mutex
+	remoteCache = map[string]remoteInfo{}
+)
+
+// applyRef sets or refreshes ru's ref on w the way `jug ref add` does: a
+// ref of the same type whose key or URL matches is replaced, else appended.
+// Reports whether anything changed.
+func applyRef(w *store.Workstream, ru source.RefUpdate) bool {
+	nr := ru.Ref
+	nr.Closed = ru.Closed
+	for i := range w.Refs {
+		r := &w.Refs[i]
+		if r.Type != nr.Type || !((nr.Key != "" && r.Key == nr.Key) || (nr.URL != "" && r.URL == nr.URL)) {
+			continue
+		}
+		if r.Key == nr.Key && r.URL == nr.URL && r.Title == nr.Title && r.Status == nr.Status && r.Closed == nr.Closed {
+			return false
+		}
+		nr.Updated = time.Now()
+		*r = nr
+		return true
+	}
+	nr.Updated = time.Now()
+	w.Refs = append(w.Refs, nr)
+	return true
 }
 
 // createFromItem makes the workstream for a discovered item.

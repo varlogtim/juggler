@@ -120,6 +120,9 @@ func TestCRUDWithoutSway(t *testing.T) {
 	want(t, call(t, ts, "POST", "/api/v1/workstreams", map[string]any{"desc": "dup", "jira": "ABC-12"}), 400) // id/dir exists
 	want(t, call(t, ts, "POST", "/api/v1/workstreams", map[string]any{"desc": "x", "code_dir": "/nonexistent/dir"}), 400)
 	want(t, call(t, ts, "POST", "/api/v1/workstreams", map[string]any{"desc": "x", "code_dir": "/tmp", "repo": "r"}), 400)
+	want(t, call(t, ts, "POST", "/api/v1/workstreams", map[string]any{"desc": "x", "subdir": "components/x"}), 400) // subdir without repo
+	// subdir on a workstream with no checkout to move within
+	want(t, call(t, ts, "PATCH", "/api/v1/workstreams/ABC-12", map[string]any{"subdir": "components/x"}), 400)
 
 	// list + get (by name, by id, by prefix); 404 for unknown
 	if r := want(t, call(t, ts, "GET", "/api/v1/workstreams", nil), 200); len(r.list) != 2 {

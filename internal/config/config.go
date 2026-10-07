@@ -133,6 +133,11 @@ type Repo struct {
 	Path          string `toml:"path"`
 	Remote        string `toml:"remote,omitempty"`         // default origin
 	DefaultBranch string `toml:"default_branch,omitempty"` // base for new branches (default: the remote's HEAD)
+	// Subdir is where windows start inside a new worktree of this repo
+	// (a component of a monorepo), relative to the worktree root; "" = the
+	// root. `--subdir` on `jug add` / `jug repo add` overrides it per
+	// workstream ("." for the root).
+	Subdir string `toml:"subdir,omitempty"`
 	// SeedDir holds files copied into every new worktree of this repo
 	// (untracked per-checkout files such as .envrc). Text files are
 	// templated: {{id}} {{name}} {{repo}} {{dir}} {{code_dir}} {{home}}.

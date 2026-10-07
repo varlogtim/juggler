@@ -364,6 +364,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		Branch   string   `json:"branch"`
 		Base     string   `json:"base"`
 		NoFetch  bool     `json:"no_fetch"`
+		Subdir   string   `json:"subdir"` // inside the worktree; "" = the repo's default, "." = the root
 		Show     bool     `json:"show"`
 		Groups   []string `json:"groups"`
 	}
@@ -375,6 +376,10 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, badRequest{"code_dir and repo are mutually exclusive"})
 		return
 	}
+	if b.Subdir != "" && b.Repo == "" {
+		s.fail(w, badRequest{"subdir needs repo (it is a path inside the worktree)"})
+		return
+	}
 	ws, err := s.app.Create(app.CreateOptions{Category: b.Category, ID: b.ID, Desc: b.Desc, CodeDir: b.CodeDir, Jira: b.Jira, PR: b.PR, Groups: b.Groups})
 	if err != nil {
 		s.fail(w, err)
@@ -383,7 +388,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	var wt *app.WorktreeResult
 	var warnings []string
 	if b.Repo != "" {
-		res, err := s.app.AddWorktree(ws, app.WorktreeOptions{Repo: b.Repo, Branch: b.Branch, Base: b.Base, NoFetch: b.NoFetch})
+		res, err := s.app.AddWorktree(ws, app.WorktreeOptions{Repo: b.Repo, Branch: b.Branch, Base: b.Base, NoFetch: b.NoFetch, Subdir: b.Subdir})
 		if err != nil {
 			warnings = append(warnings, "created without code: "+err.Error())
 		} else {
@@ -417,6 +422,7 @@ func (s *Server) set(w http.ResponseWriter, r *http.Request) {
 		ID       *string   `json:"id"`
 		Desc     *string   `json:"desc"`
 		Jira     *string   `json:"jira"`
+		Subdir   *string   `json:"subdir"` // move the code dir within its checkout ("." = the root)
 		Groups   *[]string `json:"groups"` // replaces the tags
 	}
 	if err := decode(r, &b); err != nil {
@@ -428,7 +434,7 @@ func (s *Server) set(w http.ResponseWriter, r *http.Request) {
 			s.fail(w, err)
 			return
 		}
-		if b.Category == nil && b.ID == nil && b.Desc == nil && b.Jira == nil {
+		if b.Category == nil && b.ID == nil && b.Desc == nil && b.Jira == nil && b.Subdir == nil {
 			s.events.changed()
 			writeJSON(w, 200, map[string]any{"result": app.SetResult{OldName: ws.Name(), Name: ws.Name()}, "workstream": s.app.Info(ws)})
 			return
@@ -447,6 +453,7 @@ func (s *Server) set(w http.ResponseWriter, r *http.Request) {
 	if b.Jira != nil {
 		o.Jira = *b.Jira
 	}
+	o.Subdir = b.Subdir
 	var res app.SetResult
 	// windows are handled when sway is reachable; otherwise the rename still happens
 	err := s.app.WithEngine(func(e *layout.Engine) (err error) { res, err = s.app.Set(e, ws, o); return })
@@ -601,6 +608,7 @@ func (s *Server) repoAdd(w http.ResponseWriter, r *http.Request) {
 		Branch  string `json:"branch"`
 		Base    string `json:"base"`
 		NoFetch bool   `json:"no_fetch"`
+		Subdir  string `json:"subdir"` // inside the worktree; "" = the repo's default, "." = the root
 	}
 	if err := decode(r, &b); err != nil {
 		s.fail(w, err)
@@ -610,7 +618,7 @@ func (s *Server) repoAdd(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, badRequest{"repo is required"})
 		return
 	}
-	res, err := s.app.AddWorktree(ws, app.WorktreeOptions{Repo: b.Repo, Branch: b.Branch, Base: b.Base, NoFetch: b.NoFetch})
+	res, err := s.app.AddWorktree(ws, app.WorktreeOptions{Repo: b.Repo, Branch: b.Branch, Base: b.Base, NoFetch: b.NoFetch, Subdir: b.Subdir})
 	if err != nil {
 		s.fail(w, err)
 		return

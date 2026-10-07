@@ -29,7 +29,8 @@ import (
 	"github.com/varlogtim/juggler/internal/web"
 
 	// connectors register themselves
-	_ "github.com/varlogtim/juggler/internal/source/jira"
+	_ "github.com/varlogtim/juggler/internal/source/github" // registers kind = "github"
+	_ "github.com/varlogtim/juggler/internal/source/jira"   // registers kind = "jira"
 )
 
 var version = "dev"
@@ -70,11 +71,13 @@ workstreams
   ls [--group G] [--finished] [--json]
                          list workstreams (finished ones only with --finished or --json)
   add [--category C] [--id ID] [--jira KEY] [--pr URL] [--group G]… [--show] DESC…
-      [--code-dir DIR | --repo NAME|PATH [--branch B] [--base BASE] [--no-fetch]]
+      [--code-dir DIR | --repo NAME|PATH [--branch B] [--base BASE] [--no-fetch] [--subdir D]]
                          create <C>_<ID>_<slug>/ under the root (default C: personal, ID: <user>-NNNN);
                          --repo gives it its own git worktree at <ws>/src/<repo> (branch default:
-                         the id for ticket ids, else <user>/<slug>; base: the remote's HEAD)
-  repo add --repo NAME|PATH [--branch B] [--base BASE] [--no-fetch] [--ws WS]
+                         the id for ticket ids, else <user>/<slug>; base: the remote's HEAD);
+                         --subdir D starts windows in <worktree>/D — a component of a monorepo
+                         (default: the repo's subdir in config; "." = the worktree root)
+  repo add --repo NAME|PATH [--branch B] [--base BASE] [--no-fetch] [--subdir D] [--ws WS]
                          add such a worktree to an existing workstream and point code_dir at it
   repo seed [--ws WS] [--force]
                          (re)copy the repo's seed files (~/.config/juggler/seed/<repo>/: .envrc etc.,
@@ -83,7 +86,7 @@ workstreams
   ref add TYPE VALUE [--title T] [--status S] [--ws WS]
                          attach a ref: jira KEY | pr URL | issue URL | url URL
   ref rm TYPE [KEY|URL] [--ws WS] | ref ls [--ws WS]
-  set WS [--category C] [--id ID] [--desc D] [--jira KEY]
+  set WS [--category C] [--id ID] [--desc D] [--jira KEY] [--subdir D]
                          rename / recategorize (the directory follows); windows are closed and, if it
                          was displayed, reopened — opencode resumes its pinned session. --jira attaches
                          the ticket and, unless given, sets the id to it and the category to work
@@ -420,9 +423,10 @@ func (c *cli) set(args []string) int {
 	fs.StringVar(&o.ID, "id", "", "")
 	fs.StringVar(&o.Desc, "desc", "", "")
 	fs.StringVar(&o.Jira, "jira", "", "attach this ticket; also sets --id (and --category work) unless given")
+	fs.Func("subdir", `move the code dir to this path inside its checkout ("." = the root)`, func(v string) error { o.Subdir = &v; return nil })
 	pos, err := parseMixed(fs, args)
 	if err != nil || len(pos) != 1 {
-		fmt.Fprintln(os.Stderr, "usage: jug set WS [--category C] [--id ID] [--desc D] [--jira KEY]")
+		fmt.Fprintln(os.Stderr, "usage: jug set WS [--category C] [--id ID] [--desc D] [--jira KEY] [--subdir D]")
 		return 2
 	}
 	w, err := c.app.Resolve(pos[0])
@@ -438,6 +442,12 @@ func (c *cli) set(args []string) int {
 	}
 	if res.Moved {
 		fmt.Printf("%s -> %s\n", res.OldName, res.Name)
+	}
+	if res.CodeDir != "" {
+		fmt.Printf("%s: windows start in %s\n", w.ID, layout.ShortDir(res.CodeDir))
+		if st, err := store.LoadState(c.app.Cfg.StateDir); err == nil && st.Streams[w.Name()] != nil {
+			fmt.Printf("note: windows already open for %s keep the old dir; `jug close %s` then show it\n", w.ID, w.ID)
+		}
 	}
 	return 0
 }
@@ -1035,6 +1045,7 @@ func wtFlags(fs *flag.FlagSet) *wtOpts {
 	fs.StringVar(&w.o.Branch, "branch", "", "branch for the worktree (default: the id, or <user>/<slug>)")
 	fs.StringVar(&w.o.Base, "base", "", "branch to start a new branch from (default: the remote's HEAD)")
 	fs.BoolVar(&w.o.NoFetch, "no-fetch", false, "do not fetch before creating")
+	fs.StringVar(&w.o.Subdir, "subdir", "", `where windows start inside the worktree (default: the repo's subdir in config; "." = the root)`)
 	return w
 }
 
@@ -1051,12 +1062,15 @@ func (c *cli) add(args []string) int {
 	show := fs.Bool("show", false, "")
 	wt := wtFlags(fs)
 	if err := fs.Parse(args); err != nil || fs.NArg() == 0 {
-		fmt.Fprintln(os.Stderr, "usage: jug add [--category C] [--id ID] [--jira KEY] [--pr URL] [--group G]… [--show] [--code-dir DIR | --repo NAME|PATH [--branch B] [--base BASE] [--no-fetch]] DESC…")
+		fmt.Fprintln(os.Stderr, "usage: jug add [--category C] [--id ID] [--jira KEY] [--pr URL] [--group G]… [--show] [--code-dir DIR | --repo NAME|PATH [--branch B] [--base BASE] [--no-fetch] [--subdir D]] DESC…")
 		return 2
 	}
 	o.Groups = groups
 	if o.CodeDir != "" && wt.o.Repo != "" {
 		return fail(errors.New("--code-dir and --repo are mutually exclusive"))
+	}
+	if wt.o.Subdir != "" && wt.o.Repo == "" {
+		return fail(errors.New("--subdir needs --repo (it is a path inside the worktree)"))
 	}
 	o.Desc = strings.Join(fs.Args(), " ")
 	w, err := c.app.Create(o)
@@ -1079,6 +1093,9 @@ func (c *cli) addWorktree(w *store.Workstream, o app.WorktreeOptions) error {
 	res, err := c.app.AddWorktree(w, o)
 	if res.What != "" {
 		fmt.Printf("%s: %s -> %s\n", w.ID, res.What, layout.ShortDir(res.Path))
+	}
+	if res.CodeDir != "" && res.CodeDir != res.Path {
+		fmt.Printf("%s: windows start in %s\n", w.ID, layout.ShortDir(res.CodeDir))
 	}
 	if len(res.Seeded) > 0 {
 		fmt.Printf("%s: seeded %s from %s\n", w.ID, strings.Join(res.Seeded, ", "), layout.ShortDir(c.app.Cfg.SeedDirFor(res.Repo)))
@@ -1105,14 +1122,14 @@ func (c *cli) repo(args []string) int {
 		return fail(err)
 	}
 	if len(args) == 0 || args[0] != "add" {
-		fmt.Fprintln(os.Stderr, "usage: jug repo add --repo NAME|PATH [--branch B] [--base BASE] [--no-fetch] [--ws WS]\n       jug repo seed [--ws WS] [--force]")
+		fmt.Fprintln(os.Stderr, "usage: jug repo add --repo NAME|PATH [--branch B] [--base BASE] [--no-fetch] [--subdir D] [--ws WS]\n       jug repo seed [--ws WS] [--force]")
 		return 2
 	}
 	fs := flag.NewFlagSet("repo add", flag.ContinueOnError)
 	ws := wsFlag(fs)
 	wt := wtFlags(fs)
 	if err := fs.Parse(args[1:]); err != nil || wt.o.Repo == "" {
-		fmt.Fprintln(os.Stderr, "usage: jug repo add --repo NAME|PATH [--branch B] [--base BASE] [--no-fetch] [--ws WS]")
+		fmt.Fprintln(os.Stderr, "usage: jug repo add --repo NAME|PATH [--branch B] [--base BASE] [--no-fetch] [--subdir D] [--ws WS]")
 		return 2
 	}
 	w, err := c.target(*ws)
@@ -1538,6 +1555,7 @@ func printReport(r *app.Report) {
 	list("updated", r.Updated)
 	list("regrouped", r.Regrouped)
 	list("tombstoned", r.Tombstone)
+	list("refs refreshed", r.Refs)
 	list("finished (skipped)", r.Finished)
 	if len(r.Prunable) > 0 {
 		fmt.Printf("  %-18s %s\n  %-18s jug source prune %s\n", "prunable:", strings.Join(r.Prunable, " "), "", r.Source)

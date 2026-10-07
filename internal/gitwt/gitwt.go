@@ -60,12 +60,13 @@ func IsLinkedWorktree(dir string) bool {
 	return err == nil && !fi.IsDir()
 }
 
-// Info is a snapshot of a checkout.
+// Info is a snapshot of a checkout, taken from any directory inside it.
 type Info struct {
+	Root     string // the work tree root (dir itself, or above it)
 	Branch   string // "" when detached
 	Head     string // short hash
 	Dirty    bool   // tracked changes (staged or not)
-	Linked   bool   // a linked worktree (.git is a file)
+	Linked   bool   // a linked worktree (the root's .git is a file)
 	Main     string // the main checkout
 	Ahead    int    // commits ahead of upstream (-1 = no upstream)
 	Behind   int
@@ -78,11 +79,12 @@ func Inspect(dir string) (Info, error) {
 	if !IsRepo(dir) {
 		return in, fmt.Errorf("%s is not a git checkout", dir)
 	}
+	in.Root, _ = Toplevel(dir)
 	in.Branch, _ = git(dir, "symbolic-ref", "--quiet", "--short", "HEAD")
 	in.Head, _ = git(dir, "rev-parse", "--short", "HEAD")
 	st, _ := git(dir, "status", "--porcelain", "--untracked-files=no")
 	in.Dirty = st != ""
-	in.Linked = IsLinkedWorktree(dir)
+	in.Linked = in.Root != "" && IsLinkedWorktree(in.Root)
 	in.Main, _ = MainRepo(dir)
 	in.Ahead, in.Behind = -1, -1
 	if up, err := git(dir, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"); err == nil && up != "" {
@@ -106,6 +108,12 @@ func DefaultBranch(main, remote string) string {
 		}
 	}
 	return "main"
+}
+
+// RemoteURL returns the URL of remote in dir ("" when it has none).
+func RemoteURL(dir, remote string) string {
+	out, _ := git(dir, "remote", "get-url", remote)
+	return out
 }
 
 // Fetch updates remote/branch in main.
@@ -207,19 +215,34 @@ func Add(main, path, branch string, opt AddOptions) (string, error) {
 var ErrDirty = errors.New("worktree has uncommitted or untracked changes")
 
 // Changes lists the worktree's changed paths (tracked modifications and
-// untracked files, relative to the worktree root).
+// untracked files, relative to the worktree root, from any directory in it).
 func Changes(path string) ([]string, error) {
-	st, err := git(path, "status", "--porcelain")
-	if err != nil {
-		return nil, err
+	// -z: NUL-separated records, paths unquoted; porcelain v1 paths are
+	// always relative to the root. Not through git(): it trims the output,
+	// which would eat the leading status space of the first record.
+	cmd := exec.Command("git", "-C", path, "status", "--porcelain", "-z")
+	var out, errb bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errb
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(errb.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return nil, fmt.Errorf("git status: %s", msg)
 	}
-	var out []string
-	for _, line := range strings.Split(st, "\n") {
-		if len(line) > 3 {
-			out = append(out, strings.TrimSpace(line[3:]))
+	var paths []string
+	recs := strings.Split(out.String(), "\x00")
+	for i := 0; i < len(recs); i++ {
+		rec := recs[i]
+		if len(rec) < 4 {
+			continue
+		}
+		paths = append(paths, rec[3:])
+		if rec[0] == 'R' || rec[0] == 'C' {
+			i++ // a rename/copy record is followed by the original path
 		}
 	}
-	return out, nil
+	return paths, nil
 }
 
 // Remove removes the linked worktree at path. Without force it refuses
