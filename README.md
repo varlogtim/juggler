@@ -833,9 +833,12 @@ used, and the token is never logged.
 
 juggler never moves individual windows around; it builds one container per
 workstream and moves *that*. These are the sway facts it relies on, each
-verified by `scripts/m0-sway-poc.sh` (layout) and `scripts/lot-poc.sh`
-(parking) — `make poc` / `make poc-lot`; both open and close a few windows on
-scratch workspaces and refuse to touch a real slot or lot:
+verified by `scripts/m0-sway-poc.sh` (layout), `scripts/lot-poc.sh`
+(parking) and `scripts/ensure-poc.sh` (repair) — `make poc` / `make poc-lot`
+/ `make poc-ensure`; they open and close a few windows on scratch workspaces
+and refuse to touch a real slot or lot (the last one never even shows its
+workspace: every batch switches there, acts and refocuses your window in
+one message):
 
 | fact | consequence |
 |---|---|
@@ -847,6 +850,9 @@ scratch workspaces and refuse to touch a real slot or lot:
 | `move container to mark jug:lot` adds the root as a tab of the lotbox, intact; the first park has no lotbox yet, so the root hops via the scratchpad into the empty lot, where `workspace_layout` wraps it — that wrapper is marked `jug:lot` and set `tabbed` | **park** = one transaction. Tabs keep full size, so hidden TUIs do not reflow. Scratchpad keys are unaffected |
 | strays can be moved into a hidden root's right stack by mark; then `move scratchpad; move container to workspace <slot>; floating disable; split none; resize …` and a final `focus` | **restore** = one IPC message = one frame, even when the slot workspace is not visible; focus ends where it was |
 | sway records the focused workspace at `exec` time (launch context, matched by pid) and a view that maps into a non-visible workspace never steals focus | `jug term` focuses the right stack, execs, and refocuses your previous window — all in one message — so a program can add a terminal to a workstream you are not looking at |
+| closing a stack's last window **reaps the stack and its mark**; the root keeps going with one child. `move left/right` on a stack's only window puts it *into* the neighbouring stack or promotes it to a **bare child of the root with the widths reset (50/50)**; `floating toggle` twice drops it into the neighbouring stack | the marks say where things *should* be, the windows (`jug-oc:<name>`, `jug-term:<name>`) say where they *are*. **ensure** reconciles from the windows: it finds the opencode window by app_id wherever it is and puts a `:left` stack around it, first, at ⅓ — and never starts a second opencode while one exists. Every `jug show`, `$mod+w` → *opencode*/*term*/*jira*/*pr* repairs the shape |
+| a floating container tiled with `floating disable` lands in the most recently focused *tiling* container of its workspace — a split container makes it its child | the **hop**: `move scratchpad; [target] focus; move container to workspace W; floating disable` makes a window a child of *target* from anywhere (another stack, floating, the lot, another workstream's root), deterministically. `move container to mark` would do for a tiling window but leaves a floating one floating |
+| `exec` is asynchronous and app_ids are per *workstream*: every terminal is `jug-term:<name>` and a moved opencode window still is `jug-oc:<name>` | after an `exec` juggler waits for a window with that app_id that **did not exist before** — waiting for *any* would hand it an older window and apply the repair to that one while the new one lands wherever focus is (that was the bug that duplicated opencode) |
 | Chrome hands the URL to its running instance, so launch context is lost; the window lands wherever focus is | `jug open` subscribes to `window::new`, catches the new browser window and `move container to mark`s it into the right stack; its con_id is remembered so the next `open` of the same ref focuses it |
 | `rename workspace to "4:WS"` keeps the number; `workspace number "4:󰾗"` lands on `4:WS` | the slot label changes while `$mod+4` keeps working — hence the `N:label` naming requirement |
 | sway splits a command batch on `;` while tracking quotes, but an escaped quote directly followed by a quote (the shell idiom `'\''` ending a word) makes it hand the *rest of the batch* to `exec`'s shell | every argument juggler puts in an `exec` is quoted without backslashes: `'` becomes `'"'"'`, `\` becomes `'\\'` (`layout.ShellQuote`) |
@@ -1007,6 +1013,11 @@ that are not hotkeys.
 | 67 | UC16 | add `[sources.github]`; `jug sync github --dry-run`; `jug sync github`; again | the dry run lists `refs refreshed: <ws> <owner/repo#n>` for refs whose title/state differ from GitHub and for PRs of branches with no ref yet; the real run writes them (`jug ref ls --ws …` shows the new state, `closed = true` for merged/closed); the second run is "nothing to do"; the report's note reads `<host> as <login>: N pull request(s) for M branch(es), K by ref` |
 | 68 | UC16 | open a PR from a workstream's branch (no `jug ref add`), sync; merge it, sync; point a workstream's code dir at a shared main checkout on `develop`, sync | the `pr` ref appears by itself with `open`; then `merged` with the row still *not* ✓ (the ticket is open); the main checkout's branch is not looked up (the note's branch count does not grow) |
 | 69 | UC16 | `jug ref add pr https://github.com/other/repo/pull/1 --ws X` on a GHES source; break the token; sync | the github.com ref is untouched by the GHES source; with a bad token `jug source ls` shows `error: github /user: HTTP 401` and nothing is written |
+| 70 | UC2 | on the displayed workstream: `$mod+Shift+l` then `$mod+Shift+h` on the opencode window (it leaves its stack and comes back bare: 50/50); `jug show <ws>` (or `$mod+w` → *opencode*) | before: `swaymsg -t get_tree` shows the opencode view as a direct child of the root, no `:left` mark, 50/50; after: a new `:left` stack around the **same** window (same con_id), first, ⅓; exactly one `jug-oc:<ws>` window exists (`pgrep -af "opencode -s"` shows one for it) |
+| 71 | UC2 | `$mod+Shift+space` twice on the opencode window (it ends up inside the right stack); `$mod+t` → another workstream; `$mod+t` → back | the window travels with its root into the lot and back; on the return show it is hopped out of the right stack into a fresh `:left` stack, first, ⅓ — no second opencode, nothing left behind in the slot |
+| 72 | UC2 | `swaymsg '[con_id=<oc>] move container to mark jug:<other ws>:right'` (carry the opencode window into another workstream's root in the lot); `jug show <ws>` | the window is fetched back from the lot into its own `:left` stack; the other workstream's tab is unchanged |
+| 73 | UC11 | with the opencode window outside its root (as in 70), `jug close <ws>` | the root *and* the loose opencode window are killed (`jug ls` shows `-`); nothing of the workstream remains in the tree |
+| 74 | — | `make poc-ensure` | 11 `PASS` lines, your focused workspace never changes, scratch windows gone afterwards |
 
 Automated: `make test` (store naming/resolution, picker rows and the
 new-workstream spec, sway-safe shell quoting, group validation/ordering and
@@ -1020,7 +1031,7 @@ an unreadable ledger, other sources' workstreams untouched — a monorepo
 worktree with a subdir code dir (seeds at the root, dirty guard and removal
 through git, `--subdir` validation), the service layer's store-only paths,
 and the HTTP API end to end against a temp store without sway). The
-sway mechanics are covered by `make poc` and `make poc-lot`; `make ui-shot`
+sway mechanics are covered by `make poc`, `make poc-lot` and `make poc-ensure`; `make ui-shot`
 renders the UI headlessly (list + detail) and fails on console errors.
 
 ## Limitations and roadmap
@@ -1054,6 +1065,12 @@ renders the UI headlessly (list + detail) and fails on console errors.
 - **A sway restart loses the windows** (not the files): juggler rebuilds a
   workstream the next time you show it and `opencode -s <pinned id>` resumes
   the conversation.
+- **Repairs happen when juggler is asked**, not as you move windows: after a
+  `move`/`floating toggle` on the opencode window the slot shows 50/50 (or
+  the window in the right stack) until the next `jug show` of that
+  workstream, `$mod+w` → *opencode*, or any other `jug` action on it. A
+  service-side reconciliation on sway window events is the obvious next
+  step; today the repair is one keystroke away.
 - **The GitHub source knows state, not health.** A `pr` ref says open /
   draft / merged / closed and its title; review decisions, CI checks and
   mergeability (what `merger` tracks) are not pulled yet — the ref would
