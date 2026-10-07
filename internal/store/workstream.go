@@ -55,7 +55,14 @@ type Workstream struct {
 	// (`opencode -s <id>`). Empty means none yet: juggler creates one on the
 	// next show (if opencode_sessions is on in the config).
 	OpencodeSession string `toml:"opencode_session,omitempty" json:"opencode_session,omitempty"`
-	Refs            []Ref  `toml:"refs,omitempty" json:"refs,omitempty"`
+	// OpencodePort is the loopback port the workstream's opencode TUI
+	// serves its HTTP API on (`opencode --port`), so that other processes
+	// — `jug say`, `jug session status`, a coordinating session — can reach
+	// the live TUI instead of writing to the session behind its back.
+	// Allocated with the session and kept for the workstream's life; 0 =
+	// none yet (the next launch gets one).
+	OpencodePort int   `toml:"opencode_port,omitzero" json:"opencode_port,omitempty"`
+	Refs         []Ref `toml:"refs,omitempty" json:"refs,omitempty"`
 	// Groups tags the workstream into buckets (a sprint, a project, …).
 	// Membership lives here; what a group is (dates, kind) lives in the
 	// registry, see groups.go.

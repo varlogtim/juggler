@@ -146,6 +146,9 @@ func (s *Server) routes() {
 	m.HandleFunc("PUT /api/v1/workstreams/{ws}/session", s.sessionPut)
 	m.HandleFunc("DELETE /api/v1/workstreams/{ws}/session", s.sessionUnpin)
 	m.HandleFunc("POST /api/v1/workstreams/{ws}/session/relaunch", s.sessionRelaunch)
+	m.HandleFunc("GET /api/v1/workstreams/{ws}/session/status", s.sessionStatus)
+	m.HandleFunc("POST /api/v1/workstreams/{ws}/say", s.say)
+	m.HandleFunc("GET /api/v1/sessions/status", s.sessionStatusAll)
 	m.HandleFunc("POST /api/v1/relaunch", s.relaunchAll)
 }
 
@@ -893,6 +896,83 @@ func (s *Server) sessionRelaunch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// sessionStatus is GET /workstreams/{ws}/session/status: what the
+// workstream's session is doing, asked of its live window (no sway).
+func (s *Server) sessionStatus(w http.ResponseWriter, r *http.Request) {
+	ws, ok := s.resolve(w, r)
+	if !ok {
+		return
+	}
+	writeJSON(w, 200, s.app.SessionState(r.Context(), ws))
+}
+
+// sessionStatusAll is GET /sessions/status: every pinned session.
+func (s *Server) sessionStatusAll(w http.ResponseWriter, r *http.Request) {
+	states, err := s.app.SessionStates(r.Context())
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	if states == nil {
+		states = []app.SessionState{}
+	}
+	writeJSON(w, 200, states)
+}
+
+// say is POST /workstreams/{ws}/say: `jug say`. Body {text, mode:
+// async|wait|draft, queue, force, timeout: "20m"}. The default (async)
+// answers once the live window accepted the message; wait holds the
+// request for the reply (bounded by timeout).
+func (s *Server) say(w http.ResponseWriter, r *http.Request) {
+	ws, ok := s.resolve(w, r)
+	if !ok {
+		return
+	}
+	var b struct {
+		Text    string `json:"text"`
+		Mode    string `json:"mode"`
+		Queue   bool   `json:"queue"`
+		Force   bool   `json:"force"`
+		Timeout string `json:"timeout"`
+	}
+	if err := decode(r, &b); err != nil {
+		s.fail(w, err)
+		return
+	}
+	if strings.TrimSpace(b.Text) == "" {
+		s.fail(w, badRequest{"text is required"})
+		return
+	}
+	o := app.SayOptions{Mode: app.SayMode(b.Mode), Queue: b.Queue, Force: b.Force}
+	switch o.Mode {
+	case "", app.SayAsync, app.SayWait, app.SayDraft:
+	default:
+		s.fail(w, badRequest{"mode must be async, wait or draft"})
+		return
+	}
+	if b.Timeout != "" {
+		d, err := time.ParseDuration(b.Timeout)
+		if err != nil || d <= 0 {
+			s.fail(w, badRequest{"timeout must be a positive duration such as 20m"})
+			return
+		}
+		o.Timeout = d
+	}
+	res, err := s.app.Say(r.Context(), ws, b.Text, o)
+	if err != nil {
+		switch {
+		case errors.Is(err, app.ErrBusy):
+			writeJSON(w, http.StatusConflict, apiError{Error: err.Error(), Code: "busy"})
+		case errors.Is(err, app.ErrNoLiveTUI):
+			writeJSON(w, http.StatusConflict, apiError{Error: err.Error(), Code: "no_live_tui"})
+		default:
+			s.fail(w, err)
+		}
+		return
+	}
+	writeJSON(w, 200, res)
 }
 
 // relaunchAll is POST /relaunch: restart every opencode window (or those of

@@ -10,10 +10,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -59,18 +61,32 @@ inside the displayed workstream (default --ws: $JUG_WORKSTREAM, else the display
   focus                  focus the opencode window
   dictate                toggle dictation notes into the workstream's notes/ dir
   env                    print the JUG_* environment for shells (eval "$(jug env)")
-  session [--ws WS]      the opencode session this workstream resumes (id + title)
+  session [--ws WS]      the opencode session this workstream resumes (id + title + port)
   session pick [--all] [--relaunch]
                          choose an existing opencode session for it (default: titles matching
                          the workstream id / refs; --all: every session of the home + code projects)
   session pin ID [--relaunch] | session new [--relaunch] | session unpin
                          pin a session id / create a fresh titled one / forget the pin
                          --relaunch restarts the workstream's opencode on the new session
+  session status [--ws WS | --all] [--json]
+                         what the session is doing, asked of its live window: idle | busy | retry,
+                         with any permission prompt waiting there; closed = no window answers,
+                         no-port = its opencode predates ports (jug relaunch WS gives it one).
+                         Exit code for one WS: 0 idle, 1 busy/retry, 3 nothing answers
+  say [--ws WS] [--wait | --draft] [--queue | --force] [--timeout D] [--json] TEXT… | -
+                         send TEXT (or stdin with -) to the workstream's opencode session, through
+                         its live window: it shows up there as a prompt and the assistant answers
+                         there — permission prompts included, so answer them in THAT window.
+                         Default: returns as soon as the message is accepted. --wait blocks for the
+                         reply and prints it (no window: runs "opencode run -s" headless instead);
+                         --draft only types it into the prompt box. A busy session is refused
+                         unless --queue (send when idle, within --timeout, default 20m) or --force
   relaunch --all | WS…   restart the opencode window(s) on their pinned sessions, in place —
                          the displayed one and the parked ones in the lot alike. This is how
-                         running sessions pick up new skills/instructions (read at start only).
-                         Whatever a session was in the middle of is interrupted; nothing is lost
-                         from the session itself. --all = every workstream that has one
+                         running sessions pick up new skills/instructions (read at start only),
+                         and how a window gets its port. Whatever a session was in the middle
+                         of is interrupted; nothing is lost from the session itself.
+                         --all = every workstream that has one
 
 workstreams
   ls [--group G] [--finished] [--json]
@@ -203,6 +219,13 @@ func run(args []string) int {
 		return c.doctor()
 	case "serve":
 		return c.serve(rest)
+	case "say":
+		return c.say(rest)
+	case "session":
+		// `session status` asks the live windows over HTTP, not sway
+		if len(rest) > 0 && rest[0] == "status" {
+			return c.sessionStatus(rest[1:])
+		}
 	}
 
 	// everything else talks to sway
@@ -891,7 +914,11 @@ func (c *cli) session(args []string) int {
 			fmt.Printf("%s\t(not found in opencode: %v)\n", w.OpencodeSession, err)
 			return 1
 		}
-		fmt.Printf("%s\t%s\t%s\t%s\n", sess.ID, sess.Updated().Format("2006-01-02 15:04"), layout.ShortDir(sess.Directory), sess.Title)
+		port := "(no port — jug relaunch gives it one)"
+		if w.OpencodePort > 0 {
+			port = "127.0.0.1:" + strconv.Itoa(w.OpencodePort)
+		}
+		fmt.Printf("%s\t%s\t%s\t%s\t%s\n", sess.ID, sess.Updated().Format("2006-01-02 15:04"), layout.ShortDir(sess.Directory), sess.Title, port)
 		if *relaunch {
 			return fail(c.app.SessionRelaunch(c.eng, w))
 		}
@@ -945,6 +972,132 @@ func (c *cli) session(args []string) int {
 	}
 	fmt.Fprintf(os.Stderr, "jug session: unknown subcommand %q\n", sub)
 	return 2
+}
+
+// sessionStatus is `jug session status [--ws WS | --all] [--json]`: what
+// each session is doing, asked of its live window over HTTP (no sway).
+func (c *cli) sessionStatus(args []string) int {
+	fs := flag.NewFlagSet("session status", flag.ContinueOnError)
+	ws := wsFlag(fs)
+	all := fs.Bool("all", false, "every workstream with a session")
+	asJSON := fs.Bool("json", false, "")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	ctx := context.Background()
+	var states []app.SessionState
+	if *all {
+		var err error
+		if states, err = c.app.SessionStates(ctx); err != nil {
+			return fail(err)
+		}
+	} else {
+		w, err := c.target(*ws)
+		if err != nil {
+			return fail(err)
+		}
+		states = []app.SessionState{c.app.SessionState(ctx, w)}
+	}
+	if *asJSON {
+		b, _ := json.MarshalIndent(states, "", "  ")
+		fmt.Println(string(b))
+		return 0
+	}
+	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	for _, st := range states {
+		fmt.Fprintf(tw, "%s\t%s\n", st.ID, st.Line())
+	}
+	tw.Flush()
+	// one workstream: the exit code says it too, for scripts that wait —
+	// 0 idle, 1 busy or retrying (a window is working on it), 3 nothing
+	// answers (closed, no port, no session, or it misbehaves)
+	if *all {
+		return 0
+	}
+	switch states[0].Status {
+	case "idle":
+		return 0
+	case "busy", "retry":
+		return 1
+	default:
+		return 3
+	}
+}
+
+// say is `jug say [--ws WS] [--wait|--draft] [--queue|--force] [--timeout D]
+// [--json] TEXT… | -`: a message to another workstream's opencode session,
+// through its live window. The reader of the result is often a script or
+// another session, hence --json.
+func (c *cli) say(args []string) int {
+	fs := flag.NewFlagSet("say", flag.ContinueOnError)
+	ws := wsFlag(fs)
+	wait := fs.Bool("wait", false, "block for the reply and print it")
+	draft := fs.Bool("draft", false, "type into the prompt box only; do not submit")
+	queue := fs.Bool("queue", false, "busy session: send once it is idle (within --timeout)")
+	force := fs.Bool("force", false, "busy session: send anyway")
+	timeout := fs.Duration("timeout", app.SayWaitTimeout, "bound for --wait / --queue")
+	asJSON := fs.Bool("json", false, "")
+	pos, err := parseMixed(fs, args)
+	if err != nil {
+		return 2
+	}
+	usage := func() int {
+		fmt.Fprintln(os.Stderr, "usage: jug say [--ws WS] [--wait | --draft] [--queue | --force] [--timeout D] [--json] TEXT… | -")
+		return 2
+	}
+	if len(pos) == 0 || (*wait && *draft) || (*queue && *force) {
+		return usage()
+	}
+	text := strings.Join(pos, " ")
+	if len(pos) == 1 && pos[0] == "-" {
+		b, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return fail(err)
+		}
+		text = string(b)
+	}
+	w, err := c.target(*ws)
+	if err != nil {
+		return fail(err)
+	}
+	o := app.SayOptions{Mode: app.SayAsync, Timeout: *timeout, Queue: *queue, Force: *force}
+	switch {
+	case *wait:
+		o.Mode = app.SayWait
+		if !*asJSON {
+			o.Stdout, o.Stderr = os.Stdout, os.Stderr // a headless run streams here
+		}
+	case *draft:
+		o.Mode = app.SayDraft
+	}
+	res, err := c.app.Say(context.Background(), w, text, o)
+	if err != nil {
+		return fail(err)
+	}
+	if *asJSON {
+		b, _ := json.MarshalIndent(res, "", "  ")
+		fmt.Println(string(b))
+		return 0
+	}
+	where := fmt.Sprintf("%s's window (127.0.0.1:%d)", w.ID, res.Port)
+	if res.Via == "run" {
+		where = w.ID + " headless (opencode run)"
+	}
+	switch res.Mode {
+	case app.SayDraft:
+		fmt.Printf("drafted in %s — press Enter there to send\n", where)
+	case app.SayWait:
+		if res.Via == "tui" { // headless output already streamed
+			fmt.Println(res.Reply)
+		}
+	default:
+		queued := ""
+		if res.Waited != "" {
+			queued = " after waiting " + res.Waited + " for idle"
+		}
+		fmt.Printf("sent to %s%s — `jug session status --ws %s` to follow\n", where, queued, w.ID)
+	}
+	return 0
 }
 
 func trunc(s string, n int) string {

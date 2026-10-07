@@ -1185,26 +1185,60 @@ func (e *Engine) openPending(w *store.Workstream, key string) error {
 // ---------------------------------------------------------------- opencode sessions
 
 // opencodeCmd is the command for the left stack: the configured opencode
-// command plus `-s <id>` when the workstream has a pinned session.
+// command plus, when the workstream has a pinned session, `-s <id>` and
+// `--port <p> --hostname 127.0.0.1` so the TUI's embedded HTTP server is
+// reachable at a known loopback address (`jug say`, `jug session status`).
 func (e *Engine) opencodeCmd(w *store.Workstream) string {
-	if e.Cfg.OpencodeSessions && w.OpencodeSession != "" {
-		return e.Cfg.Opencode + " -s " + shellQuote(w.OpencodeSession)
+	if !e.Cfg.OpencodeSessions || w.OpencodeSession == "" {
+		return e.Cfg.Opencode
 	}
-	return e.Cfg.Opencode
+	cmd := e.Cfg.Opencode + " -s " + shellQuote(w.OpencodeSession)
+	if w.OpencodePort > 0 {
+		cmd += " --port " + strconv.Itoa(w.OpencodePort) + " --hostname 127.0.0.1"
+	}
+	return cmd
 }
 
-// EnsureSession gives w a pinned opencode session if it has none: a fresh,
-// empty session titled after the workstream, created in its code dir.
+// EnsureSession gives w what its opencode needs before it is started: a
+// pinned session (a fresh, empty one titled after the workstream, created
+// in its code dir) and a loopback port for the TUI's HTTP API. Callers run
+// this only when the workstream has no opencode window, so the recorded
+// port — if any — is free unless some other process took it since.
 func (e *Engine) EnsureSession(w *store.Workstream) error {
-	if !e.Cfg.OpencodeSessions || w.OpencodeSession != "" {
+	if !e.Cfg.OpencodeSessions {
 		return nil
 	}
-	id, err := e.NewSession(w)
-	if err != nil {
-		return err
+	if w.OpencodeSession == "" {
+		id, err := e.NewSession(w)
+		if err != nil {
+			return err
+		}
+		e.debugf("created opencode session %s for %s", id, w.ID)
 	}
-	e.debugf("created opencode session %s for %s", id, w.ID)
-	return nil
+	return e.ensurePort(w)
+}
+
+// ensurePort keeps w's port while it can be bound and allocates a new one
+// otherwise. The TUI that owned it was killed moments ago (relaunch) or is
+// long gone (show after close), so a bind that fails is given a second to
+// clear before the port is given up as taken by someone else.
+func (e *Engine) ensurePort(w *store.Workstream) error {
+	if w.OpencodePort > 0 {
+		for i := 0; i < 20; i++ {
+			if oc.PortFree(w.OpencodePort) {
+				return nil
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		e.debugf("port %d of %s is taken; allocating another", w.OpencodePort, w.ID)
+	}
+	p, err := oc.FreePort()
+	if err != nil {
+		return fmt.Errorf("opencode port: %w", err)
+	}
+	w.OpencodePort = p
+	e.debugf("opencode port %d for %s", p, w.ID)
+	return e.Store.Save(w)
 }
 
 // NewSession creates a titled session for w, pins it and saves.

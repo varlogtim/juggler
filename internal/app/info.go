@@ -36,7 +36,8 @@ type WorkstreamInfo struct {
 	Completed       string      `json:"completed,omitempty"` // RFC3339: when you marked it done in juggler
 	Finished        bool        `json:"finished"`            // ticket closed or completed: hidden by default
 	OpencodeSession string      `json:"opencode_session,omitempty"`
-	State           string      `json:"state"` // displayed | parked | none
+	OpencodePort    int         `json:"opencode_port,omitempty"` // the live TUI's HTTP API, 127.0.0.1:<port>
+	State           string      `json:"state"`                   // displayed | parked | none
 	TodosOpen       int         `json:"todos_open"`
 	Git             *GitInfo    `json:"git,omitempty"`
 	Shown           string      `json:"shown,omitempty"` // RFC3339, last displayed
@@ -48,7 +49,7 @@ func (a *App) InfoOf(w *store.Workstream, tree *sway.Node, st *store.State) Work
 	in := WorkstreamInfo{
 		Name: w.Name(), ID: w.ID, Category: w.Category, Desc: w.Desc, Created: w.Created, Dir: w.Dir,
 		CodeDir: w.CodeDir, CodePath: w.ResolvedCodeDir(), CodeInside: w.CodeInside(), HasCode: w.CodeDir != "",
-		Refs: w.Refs, Groups: w.Groups, Source: w.Source, Owner: w.Owner, OpencodeSession: w.OpencodeSession, State: "none", TodosOpen: w.OpenTodos(),
+		Refs: w.Refs, Groups: w.Groups, Source: w.Source, Owner: w.Owner, OpencodeSession: w.OpencodeSession, OpencodePort: w.OpencodePort, State: "none", TodosOpen: w.OpenTodos(),
 	}
 	if in.Refs == nil {
 		in.Refs = []store.Ref{}
