@@ -585,15 +585,17 @@ func (e *Engine) returnStray(tree *sway.Node, name string, v *sway.Node) []strin
 	return hopInto(v.ID, target, ws.Name)
 }
 
-// ensure repairs a displayed workstream whose shape the user (or sway)
-// changed: a stack closed (empty containers are reaped, taking our marks
-// with them), the opencode window moved out of its stack, floated, left
-// bare in the root, or carried off into another workstream's stack. It
-// works from the WINDOWS, not the marks: the opencode window is found by
-// app_id and adopted wherever it is — a second one is never started while
-// one exists (two opencode TUIs on one session fight over it). Every batch
-// ends by putting focus back where it was, so repairing a workstream on a
-// non-visible slot never switches what the user sees.
+// ensure repairs a workstream whose shape the user (or sway) changed: a
+// stack closed (empty containers are reaped, taking our marks with them),
+// the opencode window moved out of its stack, floated, left bare in the
+// root, or carried off into another workstream's stack. It works from the
+// WINDOWS, not the marks: the opencode window is found by app_id and
+// adopted wherever it is — a second one is never started while one exists
+// (two opencode TUIs on one session fight over it). The root may be in the
+// slot or parked as a tab of the lot: windows are spawned and moved in the
+// root's own workspace. Every batch ends by putting focus back where it
+// was unless the user is looking at this very workstream, so repairing a
+// non-visible one never switches what the user sees.
 //
 // What sway does to the shape, verified by scripts/ensure-poc.sh: closing
 // a stack's last view reaps the stack but NOT the root (it keeps one
@@ -613,12 +615,27 @@ func (e *Engine) ensure(w *store.Workstream) error {
 		return nil // nothing left; Show will rebuild next time (build adopts a surviving opencode window)
 	}
 	ocID, termID := OpencodeAppID(name), "jug-term:"+name
-	slotWS := e.State.Slot.Name
+	// the workstream's workspace: the slot, or the lot when it is parked
+	anchor := root
+	if anchor == nil {
+		anchor = left
+		if anchor == nil {
+			anchor = right
+		}
+	}
+	home := tree.WorkspaceOf(anchor.ID)
+	if home == nil || home.Name == "__i3_scratch" {
+		return fmt.Errorf("%s is not in a workspace; show it first", w.ID)
+	}
+	wsName := home.Name
 	prev := tree.FocusedNode()
 	focusedWS, _ := e.FocusedWorkspace()
-	onSlot := e.State.Slot != nil && focusedWS.Num == e.State.Slot.Num
+	// looking at it: the slot is focused and this is the displayed
+	// workstream. Then the batches may leave focus on the new window;
+	// otherwise focus always goes back where it was.
+	onIt := e.State.Displayed == name && e.State.Slot != nil && focusedWS.Num == e.State.Slot.Num
 	tail := func(focusNew *sway.Node) []string {
-		if onSlot {
+		if onIt {
 			if focusNew != nil {
 				return []string{sway.IDCrit(focusNew.ID) + " focus"}
 			}
@@ -737,12 +754,12 @@ func (e *Engine) ensure(w *store.Workstream) error {
 	case left != nil:
 		// the window wandered (into the right stack, floating, another
 		// workspace, another workstream's root): bring it back
-		return run(oc, hopInto(oc.ID, left, slotWS)...)
+		return run(oc, hopInto(oc.ID, left, wsName)...)
 	}
 
 	// No left stack: build one around the window (just started, or found).
 	if p := tree.ParentOf(oc.ID); p == nil || p.ID != root.ID {
-		if err := run(nil, hopInto(oc.ID, root, slotWS)...); err != nil {
+		if err := run(nil, hopInto(oc.ID, root, wsName)...); err != nil {
 			return err
 		}
 		if err := reread(); err != nil {
@@ -1231,9 +1248,12 @@ func (e *Engine) RetitleSession(w *store.Workstream) error {
 	return srv.Rename(w.ResolvedCodeDir(), w.OpencodeSession, w.SessionTitle())
 }
 
-// RelaunchOpencode closes w's opencode window (if any) and, when w is
-// displayed, starts it again — with the currently pinned session. A parked
-// workstream gets its new opencode on the next show.
+// RelaunchOpencode closes w's opencode window (if any) and starts it again
+// in place — with the currently pinned session — whether w is displayed or
+// parked in the lot, so a parked workstream comes back with its opencode
+// already up. A workstream without windows is left alone: its next show
+// starts opencode anyway. Killing the window ends the TUI process; the
+// session itself lives in opencode's store and `-s <id>` resumes it.
 func (e *Engine) RelaunchOpencode(w *store.Workstream) error {
 	name := w.Name()
 	tree, err := e.Sway.GetTree()
@@ -1244,6 +1264,7 @@ func (e *Engine) RelaunchOpencode(w *store.Workstream) error {
 		if err := e.cmd(sway.IDCrit(v.ID) + " kill"); err != nil {
 			return err
 		}
+		// wait for the window to go: ensure must not find and adopt it
 		deadline := time.Now().Add(5 * time.Second)
 		for time.Now().Before(deadline) {
 			t, err := e.Sway.GetTree()
@@ -1256,13 +1277,22 @@ func (e *Engine) RelaunchOpencode(w *store.Workstream) error {
 			time.Sleep(30 * time.Millisecond)
 		}
 	}
-	if e.State.Displayed != name {
-		return nil
+	tree, err = e.Sway.GetTree()
+	if err != nil {
+		return err
+	}
+	if tree.ByMark(RootMark(name)) == nil && tree.ByMark(LeftMark(name)) == nil && tree.ByMark(RightMark(name)) == nil {
+		return nil // no windows: the next show builds everything
 	}
 	if err := e.EnsureSession(w); err != nil {
 		return err
 	}
 	return e.ensure(w)
+}
+
+// HasOpencode reports whether w's opencode window exists.
+func (e *Engine) HasOpencode(tree *sway.Node, w *store.Workstream) bool {
+	return tree.ByAppID(OpencodeAppID(w.Name())) != nil
 }
 
 // ---------------------------------------------------------------- helpers

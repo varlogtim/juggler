@@ -661,6 +661,19 @@ $('#empty-new').onclick = (e) => { e.preventDefault(); openCreate(); };
 $('#btn-toggle').onclick = busy($('#btn-toggle'), async () => { const r = await POST('/api/v1/slot/toggle'); toast(r.on ? `workspace ${r.slot.num} is now the slot` : 'slot released', 'ok'); scheduleRefresh(50); });
 $('#btn-park').onclick = busy($('#btn-park'), async () => { await POST('/api/v1/slot/park'); toast('parked', 'ok'); scheduleRefresh(50); });
 $('#btn-lot').onclick = busy($('#btn-lot'), async () => { await POST('/api/v1/lot'); });
+// Relaunch every opencode: it kills running TUIs (the sessions survive in
+// opencode's store and resume), so ask first and say how many.
+$('#btn-relaunch').onclick = busy($('#btn-relaunch'), async () => {
+  const live = S.items.filter(i => i.state !== 'none').length;
+  if (!live) { toast('no workstream has windows', 'err'); return; }
+  if (!confirm(`Restart the opencode window of every live workstream (${live})?\n\nEach comes back on its pinned session, parked ones in place in the lot. Whatever a session was in the middle of is interrupted; the sessions themselves are kept.`)) return;
+  const r = await POST('/api/v1/relaunch', {});
+  const parts = [`${r.relaunched.length} relaunched`];
+  if (r.skipped.length) parts.push(`${r.skipped.length} skipped`);
+  if (r.errors && r.errors.length) parts.push(`${r.errors.length} failed`);
+  toast(parts.join(', ') + (r.errors && r.errors.length ? '\n' + r.errors.join('\n') : ''), r.errors && r.errors.length ? 'err' : 'ok');
+  scheduleRefresh(50);
+});
 $('#modal-close').onclick = closeModal;
 $('#modal').addEventListener('click', (e) => { if (e.target.id === 'modal') closeModal(); });
 $('#filter').addEventListener('input', (e) => { S.filter = e.target.value; render(); });

@@ -218,6 +218,13 @@ of the same repo is one project, so `--continue` in `repo-A` can hand you a
 session from `repo-B`; sessions started from a non-repo directory (your
 home) all belong to one "global" project. Pinning sidesteps both.
 
+A session reads its skills and instructions when it starts. After installing
+new ones (or a new opencode), **`jug relaunch --all`** restarts every
+opencode window on its pinned session, in place — the displayed one and the
+parked ones in the lot alike, so each tab comes back with opencode already
+up. It interrupts whatever the TUIs were doing; the sessions themselves are
+kept. The web UI's *↻ opencode* button does the same, after asking.
+
 ## Install
 
 Requirements: sway (tested on 1.9), alacritty (the only terminal exercised:
@@ -360,6 +367,15 @@ directory's — pick one and it is pinned; add `--relaunch` to restart the
 workstream's opencode on it right away (invisible if you are on another
 workspace). `jug session` shows the pin; `jug session new` starts over with a
 fresh titled session; `jug session pin ID` pins an id you know.
+
+```sh
+jug relaunch --all          # restart every opencode window on its pinned session (new skills installed?)
+jug relaunch AISW-53270     # just this one — same as `jug session --relaunch --ws AISW-53270`
+```
+
+Parked workstreams are relaunched in place in the lot; a workstream whose
+opencode you closed is skipped (`jug show` starts one), one without windows
+is not a candidate.
 
 ### UC8 — Keep the workstream's own to-do list
 
@@ -605,6 +621,7 @@ jug env [--ws WS]                export JUG_* for a shell: eval "$(jug env)"
 jug session [--ws WS] [--relaunch]            the pinned opencode session (id, updated, dir, title)
 jug session pick [--all] [--relaunch]         adopt an existing session (titles matching id/refs; --all: everything)
 jug session pin ID | new | unpin [--relaunch] pin an id / create a fresh titled one / forget the pin
+jug relaunch --all | WS…         restart opencode window(s) on their pinned sessions, in place (parked ones too)
 jug ls [--group G] [--finished] [--json]   all workstreams (or those tagged G); finished ones only with --finished/--json
 jug complete WS | reopen WS      mark done in juggler (the ticket is not touched) / take it back
 jug add [--category C] [--id ID] [--jira KEY] [--pr URL] [--group G]… [--show] DESC…
@@ -645,7 +662,9 @@ sway is there).
 
 **The UI** (`http://127.0.0.1:7474/`): the header shows the slot, what is
 displayed, how many are parked, the current group with its days left, and
-has *grouped/flat*, *groups…*, *slot here / park / lot / + new*; the table
+has *grouped/flat*, *groups…*, *slot here / park / lot*, *↻ opencode*
+(restart every opencode window on its pinned session — asks first) and
+*+ new*; the table
 lists every workstream (state glyph, id, category, description, refs with
 their cached status, open TODO count, branch with a *dirty* badge, session)
 — grouped into collapsible sections in group order by default — with a
@@ -721,6 +740,7 @@ Do not put it behind a reverse proxy.
 | `PUT /workstreams/{ws}/session` | `jug session pin\|new` | `{id}` or `{new: true}`, `{relaunch}` |
 | `DELETE /workstreams/{ws}/session` | `jug session unpin` | |
 | `POST /workstreams/{ws}/session/relaunch` | `jug session --relaunch` | |
+| `POST /relaunch` | `jug relaunch --all` · `jug relaunch WS…` | `{workstreams: [ws…]}` optional (default: every one with an opencode window) → `{relaunched, skipped, errors}`; 503 without sway |
 
 `WorkstreamInfo` (also what `jug ls --json` prints):
 
@@ -1018,6 +1038,8 @@ that are not hotkeys.
 | 72 | UC2 | `swaymsg '[con_id=<oc>] move container to mark jug:<other ws>:right'` (carry the opencode window into another workstream's root in the lot); `jug show <ws>` | the window is fetched back from the lot into its own `:left` stack; the other workstream's tab is unchanged |
 | 73 | UC11 | with the opencode window outside its root (as in 70), `jug close <ws>` | the root *and* the loose opencode window are killed (`jug ls` shows `-`); nothing of the workstream remains in the tree |
 | 74 | — | `make poc-ensure` | 11 `PASS` lines, your focused workspace never changes, scratch windows gone afterwards |
+| 75 | UC7b | `jug relaunch <parked ws>` while on another workspace; then `jug relaunch --all` | the parked tab in the lot gets a new opencode window (new pid, `swaymsg -t get_tree` shows a new `:left` stack, same ⅓) resumed on its pinned session, your focus unchanged, ~0.5 s; `--all` prints one `relaunched` line per live workstream (displayed first), `skipped` for a live one whose opencode you had closed, and the count; the displayed workstream's opencode comes back focused |
+| 76 | web | *↻ opencode* → cancel; again → confirm | nothing happens on cancel; on confirm a toast says `N relaunched[, M skipped]`, the detail pane's session block still shows the same pinned id |
 
 Automated: `make test` (store naming/resolution, picker rows and the
 new-workstream spec, sway-safe shell quoting, group validation/ordering and
