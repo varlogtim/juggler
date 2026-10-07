@@ -68,6 +68,64 @@ type Config struct {
 	// Repos maps a short name (what `--repo` accepts) to a main checkout
 	// that owns .git; new worktrees are linked to it.
 	Repos map[string]Repo `toml:"repos"`
+
+	// Sources are the configured workstream sources ([sources.<name>]),
+	// kept undecoded here: each connector reads its own table through
+	// DecodeSource. Only `kind` is read by the core.
+	Sources map[string]toml.Primitive `toml:"sources"`
+	meta    toml.MetaData
+}
+
+// SourceKinds returns name -> kind for every configured source.
+func (c Config) SourceKinds() (map[string]string, error) {
+	out := map[string]string{}
+	for name, prim := range c.Sources {
+		var head struct {
+			Kind string `toml:"kind"`
+		}
+		if err := c.meta.PrimitiveDecode(prim, &head); err != nil {
+			return nil, fmt.Errorf("[sources.%s]: %w", name, err)
+		}
+		if head.Kind == "" {
+			return nil, fmt.Errorf("[sources.%s]: kind is required", name)
+		}
+		out[name] = head.Kind
+	}
+	return out, nil
+}
+
+// DecodeSource fills into (a connector's config struct) from [sources.name].
+func (c Config) DecodeSource(name string, into any) error {
+	prim, ok := c.Sources[name]
+	if !ok {
+		return fmt.Errorf("no [sources.%s] in %s", name, Path())
+	}
+	return c.meta.PrimitiveDecode(prim, into)
+}
+
+// Secret resolves a credential reference: "file:<path>" reads the first
+// line of that file (~ expanded); "env:<NAME>" reads the environment;
+// anything else is the value itself.
+func Secret(ref string) (string, error) {
+	switch {
+	case strings.HasPrefix(ref, "file:"):
+		b, err := os.ReadFile(Expand(strings.TrimPrefix(ref, "file:")))
+		if err != nil {
+			return "", err
+		}
+		v := strings.TrimSpace(strings.SplitN(string(b), "\n", 2)[0])
+		if v == "" {
+			return "", fmt.Errorf("%s is empty", ref)
+		}
+		return v, nil
+	case strings.HasPrefix(ref, "env:"):
+		v := os.Getenv(strings.TrimPrefix(ref, "env:"))
+		if v == "" {
+			return "", fmt.Errorf("%s is not set", ref)
+		}
+		return v, nil
+	}
+	return ref, nil
 }
 
 // Repo is a main checkout new worktrees are linked to.
@@ -150,11 +208,13 @@ func Path() string {
 func Load() (Config, error) {
 	cfg := Default()
 	p := Path()
-	if _, err := toml.DecodeFile(p, &cfg); err != nil {
+	md, err := toml.DecodeFile(p, &cfg)
+	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			return cfg, fmt.Errorf("%s: %w", p, err)
 		}
 	}
+	cfg.meta = md
 	cfg.Root = Expand(cfg.Root)
 	cfg.StateDir = Expand(cfg.StateDir)
 	for k, r := range cfg.Repos {

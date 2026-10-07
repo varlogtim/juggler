@@ -204,6 +204,17 @@ func TestCRUDWithoutSway(t *testing.T) {
 	}
 	want(t, call(t, ts, "DELETE", "/api/v1/workstreams/ABC-12/session", nil), 200)
 
+	// complete / reopen (juggler-only finished mark)
+	r = want(t, call(t, ts, "POST", "/api/v1/workstreams/ABC-12/complete", nil), 200)
+	if r.body["finished"] != true || r.body["completed"] == "" || r.body["ticket_closed"] != false {
+		t.Fatalf("complete: %s", r.raw)
+	}
+	r = want(t, call(t, ts, "POST", "/api/v1/workstreams/ABC-12/reopen", nil), 200)
+	if r.body["finished"] != false {
+		t.Fatalf("reopen: %s", r.raw)
+	}
+	want(t, call(t, ts, "POST", "/api/v1/workstreams/nope/complete", nil), 404)
+
 	// delete: without sway the files still go
 	want(t, call(t, ts, "DELETE", "/api/v1/workstreams/ABC-12", nil), 200)
 	want(t, call(t, ts, "GET", "/api/v1/workstreams/ABC-12", nil), 404)
@@ -265,6 +276,28 @@ func TestGroups(t *testing.T) {
 	}
 	if r := want(t, call(t, ts, "GET", "/api/v1/workstreams/G-1", nil), 200); len(r.body["groups"].([]any)) != 0 {
 		t.Fatalf("G-1 still tagged: %s", r.raw)
+	}
+}
+
+func TestSourcesWithoutAnyConfigured(t *testing.T) {
+	ts, _ := newTestServer(t)
+	if r := want(t, call(t, ts, "GET", "/api/v1/sources", nil), 200); len(r.list) != 0 {
+		t.Fatalf("sources: %s", r.raw)
+	}
+	want(t, call(t, ts, "GET", "/api/v1/sources/nope", nil), 404)
+	want(t, call(t, ts, "POST", "/api/v1/sources/nope/sync", nil), 404)
+	r := want(t, call(t, ts, "POST", "/api/v1/sync", nil), 200)
+	if len(r.body["reports"].([]any)) != 0 {
+		t.Fatalf("sync all with no sources: %s", r.raw)
+	}
+	want(t, call(t, ts, "POST", "/api/v1/sources/nope/prune?dry_run=true", nil), 404)
+	want(t, call(t, ts, "POST", "/api/v1/sources/nope/forgive", map[string]any{}), 400)
+	want(t, call(t, ts, "POST", "/api/v1/sources/nope/forgive", map[string]any{"keys": []string{"X-1"}}), 404)
+	// group url round-trips through the API
+	want(t, call(t, ts, "PUT", "/api/v1/groups/s1", map[string]any{"url": "https://jira.example.com/boards/1"}), 200)
+	want(t, call(t, ts, "PUT", "/api/v1/groups/s1", map[string]any{"url": "nope"}), 400)
+	if r := want(t, call(t, ts, "GET", "/api/v1/groups/s1", nil), 200); r.body["url"] != "https://jira.example.com/boards/1" {
+		t.Fatalf("group url: %s", r.raw)
 	}
 }
 

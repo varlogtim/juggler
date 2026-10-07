@@ -37,6 +37,12 @@ type Group struct {
 	Desc  string `toml:"desc,omitempty" json:"desc,omitempty"`
 	Start string `toml:"start,omitempty" json:"start,omitempty"` // YYYY-MM-DD
 	End   string `toml:"end,omitempty" json:"end,omitempty"`     // YYYY-MM-DD
+	// URL is the group's external reference — the sprint on its board, a
+	// project page — shown as a link.
+	URL string `toml:"url,omitempty" json:"url,omitempty"`
+	// Source names the configured source that registers and maintains this
+	// group (and whose tags on workstreams it manages). Empty: made by hand.
+	Source string `toml:"source,omitempty" json:"source,omitempty"`
 }
 
 // GroupsFile is the registry file name, under the store root.
@@ -82,6 +88,9 @@ func (g Group) Validate() error {
 	}
 	if g.Start != "" && g.End != "" && end.Before(start) {
 		return fmt.Errorf("%w: end %s is before start %s", ErrInvalidGroup, g.End, g.Start)
+	}
+	if g.URL != "" && !strings.Contains(g.URL, "://") {
+		return fmt.Errorf("%w: url %q is not a URL", ErrInvalidGroup, g.URL)
 	}
 	return nil
 }

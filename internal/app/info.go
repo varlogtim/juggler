@@ -30,6 +30,11 @@ type WorkstreamInfo struct {
 	HasCode         bool        `json:"has_code"`    // a code dir is configured
 	Refs            []store.Ref `json:"refs"`
 	Groups          []string    `json:"groups"`
+	Source          string      `json:"source,omitempty"`
+	Owner           string      `json:"owner,omitempty"`
+	TicketClosed    bool        `json:"ticket_closed"`       // the ticket is finished, as its source last saw it
+	Completed       string      `json:"completed,omitempty"` // RFC3339: when you marked it done in juggler
+	Finished        bool        `json:"finished"`            // ticket closed or completed: hidden by default
 	OpencodeSession string      `json:"opencode_session,omitempty"`
 	State           string      `json:"state"` // displayed | parked | none
 	TodosOpen       int         `json:"todos_open"`
@@ -43,13 +48,17 @@ func (a *App) InfoOf(w *store.Workstream, tree *sway.Node, st *store.State) Work
 	in := WorkstreamInfo{
 		Name: w.Name(), ID: w.ID, Category: w.Category, Desc: w.Desc, Created: w.Created, Dir: w.Dir,
 		CodeDir: w.CodeDir, CodePath: w.ResolvedCodeDir(), CodeInside: w.CodeInside(), HasCode: w.CodeDir != "",
-		Refs: w.Refs, Groups: w.Groups, OpencodeSession: w.OpencodeSession, State: "none", TodosOpen: w.OpenTodos(),
+		Refs: w.Refs, Groups: w.Groups, Source: w.Source, Owner: w.Owner, OpencodeSession: w.OpencodeSession, State: "none", TodosOpen: w.OpenTodos(),
 	}
 	if in.Refs == nil {
 		in.Refs = []store.Ref{}
 	}
 	if in.Groups == nil {
 		in.Groups = []string{}
+	}
+	in.TicketClosed, in.Finished = w.TicketClosed(), w.Finished()
+	if !w.Completed.IsZero() {
+		in.Completed = w.Completed.Format(time.RFC3339)
 	}
 	if tree != nil && st != nil {
 		probe := &layout.Engine{Cfg: a.Cfg, State: st}

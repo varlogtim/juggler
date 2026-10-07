@@ -13,7 +13,7 @@ func TestGroupValidateAndNames(t *testing.T) {
 			t.Errorf("%+v: %v", g, err)
 		}
 	}
-	bad := []Group{{Name: ""}, {Name: " "}, {Name: "a/b"}, {Name: "x", Start: "2026-1-1"}, {Name: "x", End: "yesterday"}, {Name: "x", Start: "2026-10-07", End: "2026-10-06"}}
+	bad := []Group{{Name: ""}, {Name: " "}, {Name: "a/b"}, {Name: "x", Start: "2026-1-1"}, {Name: "x", End: "yesterday"}, {Name: "x", Start: "2026-10-07", End: "2026-10-06"}, {Name: "x", URL: "not a url"}}
 	for _, g := range bad {
 		if err := g.Validate(); !errors.Is(err, ErrInvalidGroup) {
 			t.Errorf("%+v should be invalid, got %v", g, err)
@@ -67,12 +67,12 @@ func TestGroupsRegistryRoundTrip(t *testing.T) {
 	if err != nil || len(gs) != 0 {
 		t.Fatalf("empty registry: %v %v", gs, err)
 	}
-	in := []Group{{Name: "backlog", Kind: "bucket"}, {Name: "s20", Kind: "sprint", Start: "2026-09-23", End: "2026-10-06", Desc: "Team Nebula"}}
+	in := []Group{{Name: "backlog", Kind: "bucket"}, {Name: "s20", Kind: "sprint", Start: "2026-09-23", End: "2026-10-06", Desc: "Team Nebula", URL: "https://jira.example.com/boards/1", Source: "nebula"}}
 	if err := s.SaveGroups(in); err != nil {
 		t.Fatal(err)
 	}
 	gs, err = s.LoadGroups()
-	if err != nil || len(gs) != 2 || gs[0].Name != "s20" || gs[1].Name != "backlog" || gs[0].Desc != "Team Nebula" {
+	if err != nil || len(gs) != 2 || gs[0].Name != "s20" || gs[1].Name != "backlog" || gs[0].Desc != "Team Nebula" || gs[0].URL == "" || gs[0].Source != "nebula" {
 		t.Fatalf("round trip: %+v %v", gs, err)
 	}
 	if err := s.SaveGroups([]Group{{Name: "bad/name"}}); err == nil {

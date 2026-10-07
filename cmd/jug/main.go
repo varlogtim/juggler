@@ -4,10 +4,13 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"sort"
@@ -21,8 +24,12 @@ import (
 	"github.com/varlogtim/juggler/internal/config"
 	"github.com/varlogtim/juggler/internal/layout"
 	"github.com/varlogtim/juggler/internal/picker"
+	"github.com/varlogtim/juggler/internal/source"
 	"github.com/varlogtim/juggler/internal/store"
 	"github.com/varlogtim/juggler/internal/web"
+
+	// connectors register themselves
+	_ "github.com/varlogtim/juggler/internal/source/jira"
 )
 
 var version = "dev"
@@ -60,7 +67,8 @@ inside the displayed workstream (default --ws: $JUG_WORKSTREAM, else the display
                          --relaunch restarts the workstream's opencode on the new session
 
 workstreams
-  ls [--group G] [--json] list workstreams (--json: the same objects the REST API returns)
+  ls [--group G] [--finished] [--json]
+                         list workstreams (finished ones only with --finished or --json)
   add [--category C] [--id ID] [--jira KEY] [--pr URL] [--group G]… [--show] DESC…
       [--code-dir DIR | --repo NAME|PATH [--branch B] [--base BASE] [--no-fetch]]
                          create <C>_<ID>_<slug>/ under the root (default C: personal, ID: <user>-NNNN);
@@ -79,6 +87,10 @@ workstreams
                          rename / recategorize (the directory follows); windows are closed and, if it
                          was displayed, reopened — opencode resumes its pinned session. --jira attaches
                          the ticket and, unless given, sets the id to it and the category to work
+  complete WS | reopen WS
+                         mark the workstream done in juggler (your call, independent of the ticket)
+                         / take it back. Finished workstreams — completed, or ticket closed — are
+                         hidden from the picker (unless they have windows) and the web UI's default view
   close WS               kill the workstream's windows (files are kept)
   rm WS --yes [--force]  close its windows, remove its worktree (refuses if dirty unless --force;
                          the branch is kept) and delete the workstream directory
@@ -87,15 +99,32 @@ groups (a sprint, a project, a date range — any bucket; ordered by end date)
   group ls [--all] [--json]
                          groups that have members (--all: registered-but-empty ones too)
   group show G [--json]  one group and its members
-  group set G [--kind K] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--desc T]
+  group set G [--kind K] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--desc T] [--url U]
                          create or update the group's metadata (membership is a tag on each
-                         workstream, see "group add"; an empty value clears a field)
+                         workstream, see "group add"; an empty value clears a field; --url is the
+                         group's external reference, e.g. the sprint on its board)
   group add G WS…        tag workstreams into G (this is what makes a group exist)
   group remove G WS…     untag
   group rm G [--untag]   forget the metadata; --untag also removes the tag from every member
 
+sources (where workstreams come from: [sources.<name>] in the config, e.g. a Jira board)
+  sync [SOURCE] [--dry-run] [--json]
+                         pull the source(s) now and reconcile: create workstreams for new tickets,
+                         refresh ticket status/title, (re)tag sprints, register sprint groups.
+                         With the service running the request goes to it (so the page updates)
+  source ls [--json]     configured sources, last run, next run
+  source show NAME       the last report in full, owned keys, tombstones
+  source forgive NAME KEY…
+                         a workstream you removed is never recreated by its source (a tombstone);
+                         forgive lets the next sync bring it back
+  source prune NAME [--yes]
+                         remove the source's leftovers: workstreams it made that it no longer selects
+                         (or that finished) and that you never touched — no code, default TODO.md, no
+                         notes, no session, no windows. Without --yes: list them. Not tombstoned.
+
 server
-  serve [--listen ADDR]  REST API + web UI (default 127.0.0.1:7474); see README "Web UI and REST API"
+  serve [--listen ADDR]  REST API + web UI (default 127.0.0.1:7474) and the source scheduler
+                         (each source polls on its own interval); see README "Web UI and REST API"
 
 misc
   watch [--format plain|json|waybar]
@@ -156,6 +185,12 @@ func run(args []string) int {
 		return c.repo(rest)
 	case "group":
 		return c.group(rest)
+	case "sync":
+		return c.sync(rest)
+	case "source":
+		return c.source(rest)
+	case "complete", "reopen":
+		return c.complete(cmd, rest)
 	case "doctor":
 		return c.doctor()
 	case "serve":
@@ -840,7 +875,7 @@ func (c *cli) session(args []string) int {
 			if s.ID == w.OpencodeSession {
 				mark = "●"
 			}
-			lines = append(lines, fmt.Sprintf("%s %s  %-22s  %s", mark, s.Updated().Format("01-02 15:04"), trunc(layout.ShortDir(s.Directory), 22), s.Title))
+			lines = append(lines, fmt.Sprintf("%s %s  %-22s  %s", mark, s.Updated().Format("01-02 15:04"), truncTail(layout.ShortDir(s.Directory), 22), s.Title))
 		}
 		idx, err := picker.Fuzzel(w.ID+" session> ", lines)
 		if err != nil {
@@ -860,11 +895,25 @@ func (c *cli) session(args []string) int {
 }
 
 func trunc(s string, n int) string {
+	if len([]rune(s)) <= n {
+		return s
+	}
+	r := []rune(s)
+	return string(r[:n-1]) + "…"
+}
+
+// truncTail keeps the last n-1 runes of s behind an ellipsis: paths and
+// branches are told apart by their tail, not their head.
+func truncTail(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
 	return "…" + s[len(s)-n+1:]
 }
+
+// sourceKinds lists the connector kinds compiled in, for the "no sources
+// configured" hint.
+func sourceKinds() []string { return source.Kinds() }
 
 // ---------------------------------------------------------------- store verbs
 
@@ -872,12 +921,25 @@ func (c *cli) ls(args []string) int {
 	fs := flag.NewFlagSet("ls", flag.ContinueOnError)
 	asJSON := fs.Bool("json", false, "")
 	group := fs.String("group", "", "only workstreams tagged with this group")
+	finished := fs.Bool("finished", false, "include finished workstreams (ticket closed or completed)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	infos, err := c.app.Infos()
 	if err != nil {
 		return fail(err)
+	}
+	hidden := 0
+	if !*finished && !*asJSON {
+		var kept []app.WorkstreamInfo
+		for _, in := range infos {
+			if in.Finished && in.State == "none" {
+				hidden++
+				continue
+			}
+			kept = append(kept, in)
+		}
+		infos = kept
 	}
 	if *group != "" {
 		var kept []app.WorkstreamInfo
@@ -898,11 +960,14 @@ func (c *cli) ls(args []string) int {
 		return 0
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "STATE\tID\tCATEGORY\tDESC\tJIRA\tPR\tTODO\tSESSION\tCODE DIR\tBRANCH\tGROUPS")
+	fmt.Fprintln(tw, "STATE\tID\tCATEGORY\tDESC\tOWNER\tJIRA\tPR\tTODO\tSESSION\tCODE DIR\tBRANCH\tGROUPS")
 	for _, in := range infos {
 		state := "-"
 		if in.State != "none" {
 			state = in.State
+		}
+		if in.Finished {
+			state += " ✓"
 		}
 		jira, pr := "", ""
 		for _, r := range in.Refs {
@@ -938,9 +1003,12 @@ func (c *cli) ls(args []string) int {
 				branch += "*"
 			}
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\n", state, in.ID, in.Category, in.Desc, jira, pr, in.TodosOpen, sess, code, branch, strings.Join(in.Groups, ","))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\n", state, in.ID, in.Category, trunc(in.Desc, 48), in.Owner, jira, pr, in.TodosOpen, sess, code, branch, strings.Join(in.Groups, ","))
 	}
 	tw.Flush()
+	if hidden > 0 {
+		fmt.Printf("(%d finished hidden; --finished to show)\n", hidden)
+	}
 	return 0
 }
 
@@ -1126,7 +1194,7 @@ func (c *cli) group(args []string) int {
 			return 0
 		}
 		tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "GROUP\tKIND\tSTART\tEND\tLEFT\tMEMBERS\tDESC")
+		fmt.Fprintln(tw, "GROUP\tKIND\tSTART\tEND\tLEFT\tMEMBERS\tSOURCE\tDESC\tURL")
 		for _, g := range gs {
 			left := ""
 			if g.DaysLeft != nil {
@@ -1136,7 +1204,7 @@ func (c *cli) group(args []string) int {
 			if g.Current {
 				name += " *"
 			}
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\n", name, g.Kind, g.Start, g.End, left, g.Count, g.Desc)
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n", name, g.Kind, g.Start, g.End, left, g.Count, g.Source, g.Desc, g.URL)
 		}
 		tw.Flush()
 		return 0
@@ -1171,9 +1239,10 @@ func (c *cli) group(args []string) int {
 		fs.Func("desc", "", func(v string) error { p.Desc = &v; return nil })
 		fs.Func("start", "YYYY-MM-DD", func(v string) error { p.Start = &v; return nil })
 		fs.Func("end", "YYYY-MM-DD", func(v string) error { p.End = &v; return nil })
+		fs.Func("url", "external reference", func(v string) error { p.URL = &v; return nil })
 		pos, err := parseMixed(fs, rest)
 		if err != nil || len(pos) != 1 {
-			fmt.Fprintln(os.Stderr, "usage: jug group set G [--kind K] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--desc T]")
+			fmt.Fprintln(os.Stderr, "usage: jug group set G [--kind K] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--desc T] [--url U]")
 			return 2
 		}
 		g, err := c.app.SetGroup(pos[0], p)
@@ -1328,5 +1397,269 @@ func (c *cli) serve(args []string) int {
 	}
 	srv := web.New(c.app)
 	fmt.Printf("juggler %s: web UI and REST API on http://%s/  (root %s)\n", version, *listen, layout.ShortDir(c.app.Cfg.Root))
+	for _, st := range c.app.SourceStatuses() {
+		if st.Error != "" {
+			fmt.Printf("source %s: %s\n", st.Name, st.Error)
+		} else {
+			fmt.Printf("source %s (%s): poll %s — %s\n", st.Name, st.Kind, st.Poll, st.Describe)
+		}
+	}
 	return fail(srv.ListenAndServe(*listen))
+}
+
+// complete is `jug complete WS` and `jug reopen WS`: juggler's own finished
+// mark, set or cleared. Store-only; the ticket is never touched.
+func (c *cli) complete(verb string, args []string) int {
+	if len(args) != 1 {
+		fmt.Fprintf(os.Stderr, "usage: jug %s WS\n", verb)
+		return 2
+	}
+	w, err := c.app.Resolve(args[0])
+	if err != nil {
+		return fail(err)
+	}
+	if verb == "complete" {
+		if err := c.app.Complete(w); err != nil {
+			return fail(err)
+		}
+		fmt.Printf("%s completed (jug); hidden from the picker and the default view\n", w.ID)
+		return 0
+	}
+	if err := c.app.Reopen(w); err != nil {
+		return fail(err)
+	}
+	fmt.Printf("%s reopened\n", w.ID)
+	return 0
+}
+
+// ---------------------------------------------------------------- sources
+
+// sync runs the source(s) now. When the service is up, the request is sent
+// to it instead: its scheduler state stays right and browsers get the
+// change event.
+func (c *cli) sync(args []string) int {
+	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
+	dry := fs.Bool("dry-run", false, "report what would change, write nothing")
+	asJSON := fs.Bool("json", false, "")
+	local := fs.Bool("local", false, "run in this process even if the service is up")
+	pos, err := parseMixed(fs, args)
+	if err != nil || len(pos) > 1 {
+		fmt.Fprintln(os.Stderr, "usage: jug sync [SOURCE] [--dry-run] [--json] [--local]")
+		return 2
+	}
+	name := ""
+	if len(pos) == 1 {
+		name = pos[0]
+	}
+	var reps []*app.Report
+	var runErr error
+	if !*local {
+		if r, ok := c.syncViaService(name, *dry); ok {
+			reps = r
+		}
+	}
+	if reps == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		if name == "" {
+			reps, runErr = c.app.SyncAll(ctx, app.SyncOptions{DryRun: *dry})
+		} else {
+			src, err := c.app.SourceByName(name)
+			if err != nil {
+				return fail(err)
+			}
+			var rep *app.Report
+			rep, runErr = c.app.Sync(ctx, src, app.SyncOptions{DryRun: *dry})
+			if rep != nil {
+				reps = []*app.Report{rep}
+			}
+		}
+	}
+	if *asJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		enc.Encode(reps)
+	} else {
+		for _, r := range reps {
+			printReport(r)
+		}
+	}
+	return fail(runErr)
+}
+
+// syncViaService POSTs to the running service; ok=false when it is not up.
+func (c *cli) syncViaService(name string, dry bool) ([]*app.Report, bool) {
+	url := "http://" + c.app.Cfg.Listen + "/api/v1/sync"
+	if name != "" {
+		url = "http://" + c.app.Cfg.Listen + "/api/v1/sources/" + name + "/sync"
+	}
+	if dry {
+		url += "?dry_run=true"
+	}
+	client := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := client.Post(url, "application/json", bytes.NewReader([]byte("{}")))
+	if err != nil {
+		return nil, false
+	}
+	defer resp.Body.Close()
+	var body struct {
+		Reports []*app.Report `json:"reports"`
+		Error   string        `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, false
+	}
+	if resp.StatusCode >= 400 {
+		fmt.Fprintln(os.Stderr, "jug: service:", body.Error)
+		if body.Reports == nil {
+			return nil, true
+		}
+	}
+	fmt.Fprintln(os.Stderr, "(via the running service)")
+	return body.Reports, true
+}
+
+// printReport prints a sync report the way `jug sync` and `jug source show`
+// do: the one-line summary, then the pull's notes and each non-empty bucket.
+func printReport(r *app.Report) {
+	fmt.Println(r.Summary())
+	for _, n := range r.Notes {
+		fmt.Println("  note:", n)
+	}
+	list := func(label string, keys []string) {
+		if len(keys) > 0 {
+			fmt.Printf("  %-18s %s\n", label+":", strings.Join(keys, " "))
+		}
+	}
+	list("groups registered", r.GroupsRegistered)
+	list("groups updated", r.GroupsUpdated)
+	list("created", r.Created)
+	list("adopted", r.Adopted)
+	list("updated", r.Updated)
+	list("regrouped", r.Regrouped)
+	list("tombstoned", r.Tombstone)
+	list("finished (skipped)", r.Finished)
+	if len(r.Prunable) > 0 {
+		fmt.Printf("  %-18s %s\n  %-18s jug source prune %s\n", "prunable:", strings.Join(r.Prunable, " "), "", r.Source)
+	}
+	for _, e := range r.Errors {
+		fmt.Println("  error:", e)
+	}
+}
+
+// source is `jug source ls|show|prune|forgive`: the sources' ledgers, not
+// the sync itself (that is `jug sync`).
+func (c *cli) source(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: jug source ls [--json] | show NAME | prune NAME [--yes] | forgive NAME KEY…")
+		return 2
+	}
+	sub, rest := args[0], args[1:]
+	switch sub {
+	case "ls":
+		asJSON := len(rest) == 1 && rest[0] == "--json"
+		sts := c.app.SourceStatuses()
+		if asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			enc.Encode(sts)
+			return 0
+		}
+		if len(sts) == 0 {
+			fmt.Printf("no sources configured ([sources.<name>] in %s; kinds: %s)\n", config.Path(), strings.Join(sourceKinds(), ", "))
+			return 0
+		}
+		tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(tw, "SOURCE\tKIND\tPOLL\tLAST RUN\tNEXT\tRESULT")
+		for _, st := range sts {
+			last, next, result := "-", "-", ""
+			if st.LastRun != nil {
+				last = st.LastRun.Local().Format("01-02 15:04")
+			}
+			if st.NextRun != nil {
+				next = st.NextRun.Local().Format("15:04")
+			}
+			switch {
+			case st.Error != "":
+				result = st.Error
+			case st.Running:
+				result = "running…"
+			case st.LastError != "":
+				result = "error: " + st.LastError
+			case st.LastReport != nil:
+				result = strings.TrimPrefix(st.LastReport.Summary(), st.Name+": ")
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", st.Name, st.Kind, st.Poll, last, next, result)
+		}
+		tw.Flush()
+		return 0
+	case "show":
+		if len(rest) != 1 {
+			fmt.Fprintln(os.Stderr, "usage: jug source show NAME")
+			return 2
+		}
+		for _, st := range c.app.SourceStatuses() {
+			if st.Name != rest[0] {
+				continue
+			}
+			fmt.Printf("%s\t%s\t%s\n", st.Name, st.Kind, st.Describe)
+			if st.Error != "" {
+				fmt.Println("error:", st.Error)
+			}
+			fmt.Printf("owned: %d\ttombstones: %s\n", st.Owned, strings.Join(st.Tombstones, " "))
+			if st.LastReport != nil {
+				printReport(st.LastReport)
+			}
+			if st.LastError != "" {
+				fmt.Println("last error:", st.LastError)
+			}
+			return 0
+		}
+		return fail(fmt.Errorf("no source %q", rest[0]))
+	case "prune":
+		fs := flag.NewFlagSet("source prune", flag.ContinueOnError)
+		yes := fs.Bool("yes", false, "")
+		pos, err := parseMixed(fs, rest)
+		if err != nil || len(pos) != 1 {
+			fmt.Fprintln(os.Stderr, "usage: jug source prune NAME [--yes]")
+			return 2
+		}
+		// windows are checked through sway when it is reachable
+		var eng *layout.Engine
+		if e, done, err := c.app.Engine(); err == nil {
+			defer done()
+			eng = e
+		}
+		removed, skipped, err := c.app.Prune(eng, pos[0], !*yes)
+		for _, sk := range skipped {
+			fmt.Println("  skipped:", sk)
+		}
+		if err != nil {
+			return fail(err)
+		}
+		if !*yes {
+			if len(removed) == 0 {
+				fmt.Println("nothing to prune")
+				return 0
+			}
+			fmt.Printf("would remove %d untouched workstream(s) %s no longer selects:\n  %s\nre-run with --yes\n", len(removed), pos[0], strings.Join(removed, " "))
+			return 1
+		}
+		fmt.Printf("removed %d: %s\n", len(removed), strings.Join(removed, " "))
+		return 0
+	case "forgive":
+		if len(rest) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: jug source forgive NAME KEY…")
+			return 2
+		}
+		for _, k := range rest[1:] {
+			if err := c.app.Forgive(rest[0], k); err != nil {
+				return fail(err)
+			}
+			fmt.Printf("%s: %s may be recreated on the next sync\n", rest[0], k)
+		}
+		return 0
+	}
+	fmt.Fprintf(os.Stderr, "jug source: unknown subcommand %q\n", sub)
+	return 2
 }

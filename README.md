@@ -29,14 +29,15 @@ no patched compositor: it only speaks sway's IPC protocol. The optional
 `jug serve` (a systemd user service) puts the same operations behind a
 REST API and a web UI.
 
-**Status: stage two.** Stage one: slot, lot, picker, single-key menu,
+**Status: stage three.** Stage one: slot, lot, picker, single-key menu,
 per-workstream opencode sessions, git worktrees with seeded files, waybar
 module, dictation hook. Stage two: the same operations as a **REST API** and
 a **web UI** (`jug serve`, a systemd user service), with the CLI, the API and
 the UI sharing one service layer; **groups** (sprints, projects, any bucket)
-to organize workstreams. Refs (ticket/PR) and groups are still entered by
-hand; syncing them from Jira/GitHub and the opencode-side integration are
-next — see [Limitations and roadmap](#limitations-and-roadmap).
+to organize workstreams. Stage three: **sources** — a Jira board becomes
+workstreams and sprint groups by itself and stays current (a poll every few
+minutes). The opencode-side integration and a GitHub source are next — see
+[Limitations and roadmap](#limitations-and-roadmap).
 
 - [Concepts](#concepts)
 - [Install](#install)
@@ -121,7 +122,59 @@ a project, a date range, "backlog". It has two halves, kept apart on purpose:
 
 Groups are ordered by **end date** (undated ones after, by name); the one
 whose `[start, end]` contains today is *current*. A workstream can be in
-several groups and is listed under each.
+several groups and is listed under each. A group may carry a **link** (its
+external reference — the sprint on its board).
+
+**Sources.** Workstreams can come from outside. Two nouns, deliberately
+separate: a **connector** is a *kind* of source — the code that knows one
+system (`jira` today) and reads its own configuration; a **source** is a
+configured *instance* of a connector — `[sources.nebula]`, "my team's Jira
+board". A source does one thing: **pull** a snapshot — the groups it manages
+(sprints, with dates and a link) and the items it found (tickets, with their
+identity ref, status and sprint). It never writes to the store. Turning a
+snapshot into workstreams is the **sync**, one set of rules for every
+connector:
+
+- an item is matched to a workstream by its identity ref (the `jira` ref's
+  key), never by directory name;
+- no match → a workstream is **created**: id = key, description = the
+  ticket's summary, the ref with title and status, the sprint/backlog tags,
+  `source`, and `owner` when the ticket is a teammate's. **Finished items
+  are never created** — a closed ticket you have no workstream for is not
+  work;
+- a match made by hand → **adopted**: it gets `source`; its description,
+  category and code dir are never touched — those are yours; the current
+  summary lives in the ref title;
+- every match: the ref is refreshed (title, status, finished-or-not), the
+  owner too;
+- tags: the source **owns the group names it registers** (its sprints, its
+  backlog). On a ticket it still selects, your workstream's tags from that
+  owned set are replaced by the ticket's; tags from other groups (yours,
+  another source's) are kept. Tickets it no longer selects are refreshed but
+  keep their tags — finished work stays in the sprint it finished in;
+- managed groups are registered/updated in `groups.toml` (a hand-made group
+  of the same name is taken over — that is how a hand-rolled sprint becomes
+  the synced one);
+- nothing is ever deleted. A workstream you remove is **tombstoned** in the
+  source's ledger (`~/.local/state/juggler/sync/<source>.json`) and not
+  recreated; `jug source forgive` lets it back in.
+- a source's **leftovers** — workstreams it created that it no longer
+  selects (or that finished) and that you never touched (no code dir, no
+  session, the default `TODO.md`, no notes, not completed) — are reported
+  as *prunable*; `jug source prune` removes them, without a tombstone, so a
+  ticket that comes back is simply recreated.
+
+`jug sync` runs it now; `jug serve` runs every source on its own `poll`.
+
+**Finished.** A workstream is *finished* when its ticket is closed (as the
+source last saw it — `ticket_closed`) **or you marked it complete** (`jug
+complete`, the ✓ button). `completed` is juggler's own mark: no source sets
+or clears it, and completing never touches the ticket — it is for the work
+that is done *for you* whether or not Jira agrees, and for workstreams with
+no ticket at all. Finished workstreams are hidden from the picker and from
+`jug ls` unless they still have windows, and from the web UI's default view
+(*show finished* brings them back, dim and ✓, at the bottom of their
+group). `jug reopen` clears the mark; nothing is archived or deleted.
 
 **The slot.** One workspace you choose, at any time, to be where workstreams
 are displayed. Toggling a workspace into the slot renames it (its label
@@ -161,9 +214,13 @@ Optional: [opencode](https://opencode.ai), nvim, waybar, direnv,
 ```sh
 make install          # ~/.local/bin/jug + ~/.config/sway/juggler.conf
 jug doctor            # checks sway IPC, tools, workspace naming, config
-make service-install  # optional: `jug serve` (web UI + REST API) as a systemd --user service
+make service-install  # optional: `jug serve` (web UI + REST API + source scheduler) as a systemd --user service
 make service-enable   #           start now and at login → http://127.0.0.1:7474/
 ```
+
+To pull work from Jira, add a source to `~/.config/juggler/config.toml` (see
+[Configuration](#configuration)) and `jug sync --dry-run` to see what it
+would do before it does it.
 
 Then three edits to your sway config (`sway/juggler.conf` is the bindings
 file `make install` drops in place):
@@ -423,6 +480,49 @@ group" box for a new one. This is the shape the Jira sync (next stage) fills
 in by itself: one group per sprint with the sprint's dates, each ticket
 tagged with its sprint, the rest tagged `backlog`.
 
+### UC15 — Let Jira fill the board
+
+```toml
+[sources.nebula]
+kind          = "jira"
+email         = "you@example.com"
+token         = "file:~/secrets/jira.token"
+board         = 2112               # the team's scrum board
+sprint_match  = "Nebula"           # the board lists other teams' sprints too
+poll          = "5m"
+# defaults: assignee = "me", scope = ["open", "sprint"] — your unresolved tickets,
+# plus yours in the current sprint; assignee = "any" pulls the whole team's sprint
+```
+
+```sh
+jug sync nebula --dry-run   # what would change: created / adopted / updated / regrouped / groups
+jug sync nebula             # do it (goes through the running service when there is one)
+jug source ls               # last run, next run, result
+jug group ls                # the sprints, with days left, member counts and links
+```
+
+What you get: one workstream per open ticket of yours, each sprint on the
+board as a group with its dates and a link to the board, the active sprint
+*current*, tickets in no open sprint under `backlog`. Closed tickets are
+never created; the ones you already have turn ✓ and drop out of the default
+views (see *Finished* under Concepts). Every five minutes the service
+refreshes status and sprint membership; the page updates live and the
+header chip says when the last pull was (click it to pull now). Your
+hand-made workstreams for the same tickets are adopted, not duplicated.
+Remove a ticket's workstream you don't care about and it stays gone
+(`jug source show nebula` lists the tombstones; `forgive` reverses one).
+Widen with `assignee = "any"` (the whole team's sprint; teammates' tickets
+carry an `owner` — tick *mine only* to hide them) or a named assignee;
+narrow with `jql = "project = AISW AND issuetype != Epic"`. When you narrow
+later, the sync reports what is now *prunable* and `jug source prune nebula`
+removes the untouched leftovers:
+
+```sh
+jug complete AISW-123       # done, for you — hidden from the picker and the default view
+jug reopen AISW-123         # changed your mind
+jug source prune nebula     # list the leftovers; --yes removes them (never tombstoned)
+```
+
 ### UC13 — Manage everything from a browser
 
 `make service-install && make service-enable`, then open
@@ -454,7 +554,8 @@ jug env [--ws WS]                export JUG_* for a shell: eval "$(jug env)"
 jug session [--ws WS] [--relaunch]            the pinned opencode session (id, updated, dir, title)
 jug session pick [--all] [--relaunch]         adopt an existing session (titles matching id/refs; --all: everything)
 jug session pin ID | new | unpin [--relaunch] pin an id / create a fresh titled one / forget the pin
-jug ls [--group G] [--json]      all workstreams (or those tagged G)
+jug ls [--group G] [--finished] [--json]   all workstreams (or those tagged G); finished ones only with --finished/--json
+jug complete WS | reopen WS      mark done in juggler (the ticket is not touched) / take it back
 jug add [--category C] [--id ID] [--jira KEY] [--pr URL] [--group G]… [--show] DESC…
         [--code-dir D | --repo NAME|PATH [--branch B] [--base BASE] [--no-fetch]]
 jug repo add --repo NAME|PATH [--branch B] [--base BASE] [--ws WS]   worktree for an existing workstream
@@ -463,9 +564,11 @@ jug set WS [--category C] [--id ID] [--desc D] [--jira KEY]   rename / recategor
 jug rm WS [--yes] [--force]      remove: windows, worktree (branch kept), directory
 jug group ls [--all] [--json]    groups with members (--all: registered-but-empty too); * = current
 jug group show G [--json]        one group and its members
-jug group set G [--kind K] [--start D] [--end D] [--desc T]    create / update metadata
+jug group set G [--kind K] [--start D] [--end D] [--desc T] [--url U]   create / update metadata
 jug group add G WS… | group remove G WS…                        tag / untag
 jug group rm G [--untag]         forget the metadata (--untag: remove the tag from members too)
+jug sync [SOURCE] [--dry-run] [--json] [--local]   pull now and reconcile (via the service when it runs)
+jug source ls [--json] | show NAME | prune NAME [--yes] | forgive NAME KEY…
 jug ref add TYPE VALUE [--title T] [--status S] [--ws WS]
 jug ref rm TYPE [KEY|URL] [--ws WS]
 jug ref ls [--ws WS]
@@ -495,8 +598,13 @@ has *grouped/flat*, *groups…*, *slot here / park / lot / + new*; the table
 lists every workstream (state glyph, id, category, description, refs with
 their cached status, open TODO count, branch with a *dirty* badge, session)
 — grouped into collapsible sections in group order by default — with a
-filter box (`/` focuses it) and a *show*/*focus* button per row. Clicking a row opens the detail pane: actions (show, focus, park, term,
-notes, review, open jira/pr, dictate, close windows), an **edit** form
+filter box (`/` focuses it), *mine only* / *show finished* toggles
+(remembered; greyed out, with the reason on hover, when there is nothing
+for them to act on — no teammates' rows, or every finished workstream still
+has windows and so is listed anyway), and *show*/*focus* and ✓ *complete*
+(or ↺ *reopen*) buttons per row. Clicking a row opens the detail pane: actions (show, focus, park,
+term, notes, review, open jira/pr, dictate, close windows, complete/reopen),
+an **edit** form
 (category, id, description, ticket — the directory follows), **code**
 (branch, head, upstream, worktree-of; *add worktree* / *re-seed*), **refs**
 (add/remove/open), **groups** (a checkbox per known group, a box for a new
@@ -525,9 +633,15 @@ Do not put it behind a reverse proxy.
 | `POST /slot/toggle` | `jug toggle` | `{on, slot}` |
 | `POST /slot/park` · `/slot/park-others` | `jug park` · `jug park --others` | |
 | `POST /lot` | `jug lot` | 409 when nothing is parked |
+| `GET /sources` | `jug source ls` | `[SourceStatus]`: kind, poll, last/next run, last report, tombstones |
+| `GET /sources/{name}` | `jug source show` | one `SourceStatus` |
+| `POST /sources/{name}/sync?dry_run=true` | `jug sync NAME` | `{reports: [Report]}`; 502 `sync_failed` with the partial report when the pull failed |
+| `POST /sync?dry_run=true` | `jug sync` | every source |
+| `POST /sources/{name}/forgive` | `jug source forgive` | `{keys: [...]}` |
+| `POST /sources/{name}/prune?dry_run=true` | `jug source prune [--yes]` | `{removed, skipped, dry_run}`; a workstream with windows is skipped |
 | `GET /groups?all=true` | `jug group ls [--all]` | `[GroupInfo]` in group order; without `all` only groups with members |
 | `GET /groups/{name}` | `jug group show` | `GroupInfo` (registered or merely in use) |
-| `PUT /groups/{name}` | `jug group set` | `{kind, start, end, desc}` (fields present are set; `""` clears) |
+| `PUT /groups/{name}` | `jug group set` | `{kind, start, end, desc, url}` (fields present are set; `""` clears) |
 | `DELETE /groups/{name}?untag=true` | `jug group rm [--untag]` | `{removed, untagged}` |
 | `POST /groups/{name}/members` | `jug group add` | `{workstreams: [ws…]}` → `GroupInfo` |
 | `DELETE /groups/{name}/members/{ws}` | `jug group remove` | 404 when not a member |
@@ -543,6 +657,7 @@ Do not put it behind a reverse proxy.
 | `DELETE /workstreams/{ws}/refs/{type}?key=…` | `jug ref rm` | `url=` works too |
 | `POST /workstreams/{ws}/repo` | `jug repo add` | `{repo, branch, base, no_fetch}` → 201 `{worktree, workstream}` |
 | `POST /workstreams/{ws}/seed` | `jug repo seed` | `{force}` → `{seeded}` |
+| `POST /workstreams/{ws}/complete` · `/reopen` | `jug complete` · `jug reopen` | → `WorkstreamInfo` |
 | `POST /workstreams/{ws}/show` | `jug show` | `{no_switch}` |
 | `POST /workstreams/{ws}/close` | `jug close` | |
 | `POST /workstreams/{ws}/open` | `jug open` | `{what: "jira"\|"pr"\|"issue"\|URL}` → `{queued}` |
@@ -561,7 +676,8 @@ Do not put it behind a reverse proxy.
   "desc": "disagg toggle requires pause", "created": "…", "dir": "/home/me/workstreams/work_AISW-53270_…",
   "code_dir": "src/ezaddon-mlis", "code_path": "/home/me/workstreams/…/src/ezaddon-mlis", "code_inside": true, "has_code": true,
   "refs": [{ "type": "jira", "key": "AISW-53270", "url": "https://…/browse/AISW-53270", "status": "Blocked" }],
-  "groups": ["PCFS-S20-26.09.23-Nebula"],
+  "groups": ["PCFS-S20-26.09.23-Nebula"], "source": "nebula", "owner": "",
+  "ticket_closed": false, "completed": "", "finished": false,
   "opencode_session": "ses_…", "state": "parked", "todos_open": 5, "shown": "2026-10-05T12:00:00-04:00",
   "git": { "branch": "tim/aisw-53270-…", "head": "48faeb67", "dirty": false, "linked": true, "main": "/home/me/src/ezaddon-mlis", "upstream": "origin/…", "ahead": 0, "behind": 0 } }
 ```
@@ -569,8 +685,9 @@ Do not put it behind a reverse proxy.
 `GroupInfo`:
 
 ```json
-{ "name": "PCFS-S20-26.09.23-Nebula", "kind": "sprint", "desc": "Team Nebula sprint 20",
-  "start": "2026-09-23", "end": "2026-10-06", "registered": true, "current": true, "days_left": 2,
+{ "name": "PCFS-S20-26.09.23-Nebula", "kind": "sprint", "desc": "",
+  "start": "2026-09-23", "end": "2026-10-06", "url": "https://…/boards/2112?sprint=115375", "source": "nebula",
+  "registered": true, "current": true, "days_left": 2,
   "members": ["work_AISW-53270_…", "work_AISW-53350_…"], "count": 2 }
 ```
 
@@ -625,7 +742,26 @@ path           = "~/src/ezaddon-mlis"          # the main checkout that owns .gi
 default_branch = "develop"                     # base for new branches (default: the remote's HEAD)
 # remote       = "origin"
 # seed_dir     = "~/.config/juggler/seed/ezaddon-mlis"   # the default, when it exists
+
+[sources.nebula]                               # a source: kind + the connector's own keys
+kind          = "jira"
+base_url      = "https://yourcompany.atlassian.net"   # default: jira_base_url
+email         = "you@example.com"
+token         = "file:~/secrets/jira.token"    # "file:<path>", "env:<VAR>", or the value
+board         = 2112                           # scrum board: its sprints become groups
+sprint_match  = "Nebula"                       # keep sprints whose name contains this ("" = all)
+assignee      = "me"                           # me: assignee = currentUser(); any: everyone; or a name / JQL clause
+scope         = ["open", "sprint"]             # open: unresolved tickets; sprint: the current sprint (both filtered by assignee)
+jql           = ""                             # extra filter ANDed to every scope, e.g. "issuetype != Epic"
+category      = "work"                         # for created workstreams
+backlog_group = "backlog"                      # tickets in no open sprint ("" = don't tag)
+poll          = "5m"                           # scheduler interval ("0" = manual only)
+# sprint_field = "customfield_10020"           # discovered from the instance when empty
+# group_url    = "{base}/jira/software/c/projects/{project}/boards/{board}?sprint={sprint}"
 ```
+
+Credentials never appear in config files by value when `file:`/`env:` is
+used, and the token is never logged.
 
 ## How it works
 
@@ -668,6 +804,33 @@ whole batch with "No matching node." for an unmatched criteria. The opencode
 session pin is part of the workstream itself (`workstream.toml`), because it
 must survive everything else.
 
+**Sources, in one picture.**
+
+```
+config [sources.X]  ──kind──▶  Connector.Open  ──▶  Source
+                                                     │ Pull(known keys)
+                                                     ▼
+                                                  Snapshot { groups[], items[] }
+                                                     │ app.Sync (the rules under Concepts → Sources)
+                                                     ▼
+                       groups.toml  ◀──register──  ──create/adopt/refresh/retag──▶  workstream.toml…
+                                                     │
+                                                     ▼
+                                      ledger  sync/X.json  { owned, tombstones, last run/report }
+```
+
+The Jira connector per pull: `myself` (who you are, once), the sprint
+custom field id (discovered once), the board (project key for links),
+`board/{id}/sprint?state=active,future` → groups, one `search/jql` per
+scope (`resolution = Unresolved` · `sprint = <current id>`, each `AND
+assignee = currentUser()` unless `assignee` says otherwise, `AND (<jql>)`
+when set), and one `key in (...)` search for workstreams it owns that the
+scopes no longer select — about six requests. Sprint dates are converted to
+local calendar days. Items in a closed-only or foreign sprint go to
+`backlog`; finished items are never backlogged, and never created. The
+ledger also remembers which keys the last pull selected: that is what
+*prunable* is measured against.
+
 **One service layer, three faces.** Every operation lives once, in
 `internal/app`, as a function that takes inputs and returns values. The CLI
 (`cmd/jug`) parses flags and prints; the HTTP layer (`internal/web`) decodes
@@ -684,7 +847,9 @@ helpers) · `internal/layout` (build/show/park/spawn/open) · `internal/store`
 (workstream.toml, state.json) · `internal/picker` (fuzzel rows) ·
 `internal/bar` (waybar stream) · `internal/oc` (opencode session API) ·
 `internal/gitwt` (git worktrees) · `internal/seed` (per-checkout files) ·
-`internal/config`. Scripts: `scripts/relocate-venv.sh`,
+`internal/source` (Connector/Source/Snapshot) · `internal/source/jira` (the
+Jira connector and its client) · `internal/app/sync.go` + `scheduler.go`
+(the rules, the ledger, the poll loop) · `internal/config`. Scripts: `scripts/relocate-venv.sh`,
 `scripts/rename-workspaces.sh`, `scripts/ui-shot.mjs` (headless render of
 the UI over the DevTools protocol, for smoke tests), the PoCs.
 
@@ -746,11 +911,29 @@ that are not hotkeys.
 | 47 | UC14 | in a workstream's detail pane tick `s-next`, then untick `s-now`; type a new name in "add to group" | each change saves (`jug ls --group …`), the list regroups live; the new group appears as a section; unticking the last member of an unregistered group makes it disappear |
 | 48 | UC14 | *groups…*: change `s-now`'s end date with the picker, save; create `proj-x` with no dates; delete `s-next` (empty) and then `s-now` (choose "untag") | `jug group ls --all` reflects each step; after the last one the workstream has no `s-now` tag |
 | 49 | UC14 | `jug group set x --start 2026-02-01 --end 2026-01-01`; `jug group add "a/b" <ws>` | both rejected with a reason |
+| 50 | UC15 | add `[sources.<name>]` for a Jira board; `jug source ls`; `jug sync <name> --dry-run` | the source is listed with its poll; the dry run lists groups to register (sprints with dates), workstreams to create, hand-made ones to adopt — and writes nothing (`jug ls` unchanged) |
+| 51 | UC15 | `jug sync <name>` (service running) | "(via the running service)"; the report matches the dry run; `jug group ls` shows the sprints with links and member counts; `jug ls` shows the new rows with OWNER for teammates' tickets; adopted workstreams keep their description and gain `source` |
+| 52 | UC15 | `jug sync <name>` again | "nothing to do (N unchanged)" |
+| 53 | UC15 | in Jira, move one of your tickets to the next sprint (or change its status), then sync | the report says regrouped/updated for that key; `jug ls --group <next sprint>` lists it; the previous sprint tag is gone, your own tags (e.g. `proj-x`) remain |
+| 54 | UC15 | `jug rm <a synced ws> --yes`; sync | not recreated; `jug source show <name>` lists it under tombstones; `jug source forgive <name> <key>` then sync → created again |
+| 55 | UC15 | web UI | group headers show ↗ (opens the sprint on the board) and a `nebula` badge; teammates' rows show an owner badge; finished tickets are ✓ and dim at the bottom of their group; the header chip reads `⟳ nebula: Nm ago · next HH:MM` and clicking it pulls now (toast with the summary) |
+| 56 | UC15 | wait for a poll (`poll = "1m"` for the test) | `journalctl --user -u juggler` logs `sync nebula: …` every minute; the page's chip updates without a reload |
+| 57 | UC15 | break the token (`token = "x"`), restart the service, sync | the chip turns red, `jug source ls` shows `error: jira …: HTTP 401`, nothing else is touched; fix the token, sync → green |
+| 58 | UC15 | `jug complete <ws>` on a workstream with no windows; `jug ls`; `$mod+t`; web UI | `ls` ends with `(1 finished hidden; --finished to show)` and `--finished` lists it with `✓`; the picker does not offer it; the UI row is gone and the count reads `… · 1 finished hidden`; tick *show finished* → the row is back, dim, `✓`, hover says "completed by you …", the detail badge reads `✓ completed` and offers *reopen*; the ticket in Jira is unchanged |
+| 59 | UC15 | `jug reopen <ws>`; then `jug complete` a workstream that is *displayed* | reopened: back in every view, `completed` gone from `workstream.toml`; the displayed one stays in the picker/`ls`/UI with a `✓` glyph (it has windows) until you close it — hovering its ✓ says so; while *every* finished workstream is in that state, *show finished* is greyed out and its hover explains why (likewise *mine only* when no row has an owner) |
+| 60 | UC15 | close one of your tickets in Jira; sync; `jug ls`; also a closed ticket of yours you have no workstream for | updated: its ref turns `closed`, the row is ✓ and hidden by default; the never-created one shows under `finished (skipped)` in the report and does not exist (`jug ls --finished`) |
+| 61 | UC15 | set `assignee = "any"`, sync (the team's sprint arrives, teammates' rows with OWNER); set it back to `"me"`, sync; `jug source prune nebula`; `jug source prune nebula --yes`; sync | after the narrowing sync the report ends `N prunable` and names them; prune without `--yes` lists the same keys and removes nothing; with `--yes` they are gone, `owned` dropped by N, no tombstones; the next sync is "nothing to do". A teammate's workstream you had opened (windows) or edited (TODO/notes/code/session) is **not** in the list |
+| 62 | UC15 | corrupt the ledger (`echo '{"owned":1}' > ~/.local/state/juggler/sync/nebula.json`), `jug source ls`, `jug sync nebula` | the source shows `ledger: … cannot unmarshal …` instead of "owns nothing"; the sync refuses with the same error and the file is left for you to fix (restore it or delete it — the next sync then re-adopts what it finds) |
 
 Automated: `make test` (store naming/resolution, picker rows and the
 new-workstream spec, sway-safe shell quoting, group validation/ordering and
-the registry, the service layer's store-only paths, and the HTTP API end to
-end against a temp store without sway). The
+the registry, the Jira connector against a fake Jira server — pagination,
+owner detection, sprint→group rules, local dates, URLs — the sync rules
+against a fake source — create/adopt/refresh/regroup, finished never
+created, prunable and prune, complete/reopen, tombstones by removal and by
+inference, forgive, dry run, an unreadable ledger, other sources'
+workstreams untouched — the service layer's store-only paths, and the HTTP
+API end to end against a temp store without sway). The
 sway mechanics are covered by `make poc` and `make poc-lot`; `make ui-shot`
 renders the UI headlessly (list + detail) and fails on console errors.
 
@@ -785,14 +968,24 @@ renders the UI headlessly (list + detail) and fails on console errors.
 - **A sway restart loses the windows** (not the files): juggler rebuilds a
   workstream the next time you show it and `opencode -s <pinned id>` resumes
   the conversation.
-- **Refs and groups are static** until the importer lands (`jug sync`, stage
-  three): a timer that queries Jira for tickets assigned to you and GitHub
-  for the branch's PR, writes the cached `status`/`title`/`updated`, creates
-  workstreams for new tickets, registers each sprint as a group with its
-  dates and tags tickets into their sprint or `backlog`. The data model
-  already has the fields.
+- **Only Jira has a connector.** PR refs are still entered by hand; a GitHub
+  connector (branch → PR, status, review state — the data `merger` already
+  tracks) is the obvious next source, and the `Connector`/`Snapshot` seam is
+  made for it: a connector is one file plus a fake-server test.
+- **A sync creates a workstream for every ticket it selects** — with
+  `assignee = "any"` that is the whole sprint, 46 directories for a
+  46-ticket sprint. They are cheap (three files) and hidden by *mine only*,
+  but the fuzzel picker lists them (yours first). The default `assignee =
+  "me"` keeps it to your own; `jug source prune` cleans up after a change
+  of mind.
+- **Ownership changes are not followed into the directory name**: category
+  and description are set at creation; `owner` and the ref are what move.
+- **The source wins on its own fields.** Untag a synced ticket from its
+  sprint and the next pull tags it again — Jira is the truth for sprint
+  membership. Use your own groups for your own grouping.
 - **opencode integration** (stage three): a skill so the assistant keeps `TODO.md`
   current, records follow-up tickets there, and calls `jug ref add` /
   `jug open pr` when it opens a PR.
 - Then: nvim picker (`:Jug`), notifications when CI goes red or a review
-  arrives, a calendar importer, archiving finished workstreams.
+  arrives, a calendar importer, archiving finished workstreams (today they
+  are only hidden).

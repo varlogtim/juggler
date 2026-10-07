@@ -36,7 +36,8 @@ type Ref struct {
 	Key     string    `toml:"key,omitempty" json:"key,omitempty"` // AISW-53270, hpe/ezaddon-mlis#870
 	URL     string    `toml:"url" json:"url"`
 	Title   string    `toml:"title,omitempty" json:"title,omitempty"`
-	Status  string    `toml:"status,omitempty" json:"status,omitempty"`   // cached external state (importer-owned)
+	Status  string    `toml:"status,omitempty" json:"status,omitempty"`   // cached external state, in the system's own words
+	Closed  bool      `toml:"closed,omitempty" json:"closed,omitempty"`   // the external item is finished (normalized by the source)
 	Updated time.Time `toml:"updated,omitempty" json:"updated,omitempty"` // when Status was last observed
 }
 
@@ -59,6 +60,17 @@ type Workstream struct {
 	// Membership lives here; what a group is (dates, kind) lives in the
 	// registry, see groups.go.
 	Groups []string `toml:"groups,omitempty" json:"groups"`
+	// Source names the configured source (e.g. a Jira board) that created
+	// or adopted this workstream and keeps its identity ref and managed
+	// group tags up to date. Empty: made by hand.
+	Source string `toml:"source,omitempty" json:"source,omitempty"`
+	// Owner is who the external item is assigned to when that is not you
+	// (a teammate's sprint ticket). Empty: yours, or not applicable.
+	Owner string `toml:"owner,omitempty" json:"owner,omitempty"`
+	// Completed is when YOU marked the workstream done in juggler (zero =
+	// not). Independent of the ticket's state: a source never sets or
+	// clears it. See Finished.
+	Completed time.Time `toml:"completed,omitempty" json:"completed,omitempty"`
 
 	// Dir is the workstream directory (not serialized to TOML).
 	Dir string `toml:"-" json:"dir"`
@@ -98,6 +110,30 @@ func (w *Workstream) Ref(typ string) *Ref {
 	return nil
 }
 
+// IdentityRef is the ref that names the external work item this
+// workstream is about (a ticket: type jira or issue), or nil.
+func (w *Workstream) IdentityRef() *Ref {
+	for i := range w.Refs {
+		if (w.Refs[i].Type == "jira" || w.Refs[i].Type == "issue") && w.Refs[i].Key != "" {
+			return &w.Refs[i]
+		}
+	}
+	return nil
+}
+
+// TicketClosed reports whether the external item is finished (as its
+// source last saw it).
+func (w *Workstream) TicketClosed() bool {
+	r := w.IdentityRef()
+	return r != nil && r.Closed
+}
+
+// Finished is "nothing left to do here": the ticket is closed, or you
+// marked the workstream completed. Finished workstreams are hidden from the
+// picker (unless they still have windows) and from the web UI's default
+// view.
+func (w *Workstream) Finished() bool { return !w.Completed.IsZero() || w.TicketClosed() }
+
 // ResolvedCodeDir returns CodeDir expanded, or Dir when unset. A relative
 // CodeDir ("src/repo") lives inside the workstream directory.
 func (w *Workstream) ResolvedCodeDir() string {
@@ -126,6 +162,24 @@ func (w *Workstream) TodoPath() string { return filepath.Join(w.Dir, "TODO.md") 
 
 // NotesDir is where dictation / free-form notes go.
 func (w *Workstream) NotesDir() string { return filepath.Join(w.Dir, "notes") }
+
+// Untouched reports whether the workstream holds nothing of yours yet: no
+// code dir, no pinned session, the default TODO.md, an empty notes dir, not
+// completed. What a source made and you never opened.
+func (w *Workstream) Untouched() bool {
+	if w.CodeDir != "" || w.OpencodeSession != "" || !w.Completed.IsZero() {
+		return false
+	}
+	b, err := os.ReadFile(w.TodoPath())
+	if err != nil || string(b) != defaultTodo(w) {
+		return false
+	}
+	entries, err := os.ReadDir(w.NotesDir())
+	if err != nil {
+		return true // no notes dir at all
+	}
+	return len(entries) == 0
+}
 
 // OpenTodos counts unchecked "- [ ]" items in TODO.md.
 func (w *Workstream) OpenTodos() int {
@@ -201,7 +255,12 @@ func (s Store) Save(w *Workstream) error {
 	if err := toml.NewEncoder(&buf).Encode(w); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(w.Dir, FileName), buf.Bytes(), 0o644); err != nil {
+	// temp + rename: a reader (the web server, a sync) never sees a half file
+	tmp := filepath.Join(w.Dir, FileName+".tmp")
+	if err := os.WriteFile(tmp, buf.Bytes(), 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, filepath.Join(w.Dir, FileName)); err != nil {
 		return err
 	}
 	if _, err := os.Stat(w.TodoPath()); errors.Is(err, os.ErrNotExist) {
@@ -211,6 +270,10 @@ func (s Store) Save(w *Workstream) error {
 	}
 	return nil
 }
+
+// DefaultTodo is the TODO.md a new workstream starts with. Untouched means
+// "still equal to this".
+func DefaultTodo(w *Workstream) string { return defaultTodo(w) }
 
 func defaultTodo(w *Workstream) string {
 	var b strings.Builder

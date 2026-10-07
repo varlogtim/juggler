@@ -26,7 +26,7 @@ type GroupInfo struct {
 
 // GroupPatch sets the fields that are non-nil.
 type GroupPatch struct {
-	Kind, Desc, Start, End *string
+	Kind, Desc, Start, End, URL *string
 }
 
 // Groups returns every group that has members, decorated from the
@@ -144,6 +144,9 @@ func (a *App) SetGroup(name string, p GroupPatch) (store.Group, error) {
 	}
 	if p.End != nil {
 		g.End = strings.TrimSpace(*p.End)
+	}
+	if p.URL != nil {
+		g.URL = strings.TrimSpace(*p.URL)
 	}
 	if err := g.Validate(); err != nil {
 		return store.Group{}, fmt.Errorf("%w: %v", ErrInvalid, err)

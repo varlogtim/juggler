@@ -243,5 +243,9 @@ func (a *App) Remove(e *layout.Engine, w *store.Workstream, force bool) error {
 			return err
 		}
 	}
-	return a.removeFiles(w, force)
+	if err := a.removeFiles(w, force); err != nil {
+		return err
+	}
+	a.tombstoneIfSourced(w)
+	return nil
 }
