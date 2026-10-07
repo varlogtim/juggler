@@ -294,6 +294,9 @@ func TestSourcesWithoutAnyConfigured(t *testing.T) {
 		t.Fatalf("sync all with no sources: %s", r.raw)
 	}
 	want(t, call(t, ts, "POST", "/api/v1/sources/nope/prune?dry_run=true", nil), 404)
+	// relaunching opencode windows needs sway
+	want(t, call(t, ts, "POST", "/api/v1/relaunch", nil), 503)
+	want(t, call(t, ts, "POST", "/api/v1/relaunch", map[string]any{"workstreams": []string{"ABC-12"}}), 503)
 	want(t, call(t, ts, "POST", "/api/v1/sources/nope/forgive", map[string]any{}), 400)
 	want(t, call(t, ts, "POST", "/api/v1/sources/nope/forgive", map[string]any{"keys": []string{"X-1"}}), 404)
 	// group url round-trips through the API

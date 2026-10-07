@@ -66,6 +66,11 @@ inside the displayed workstream (default --ws: $JUG_WORKSTREAM, else the display
   session pin ID [--relaunch] | session new [--relaunch] | session unpin
                          pin a session id / create a fresh titled one / forget the pin
                          --relaunch restarts the workstream's opencode on the new session
+  relaunch --all | WS…   restart the opencode window(s) on their pinned sessions, in place —
+                         the displayed one and the parked ones in the lot alike. This is how
+                         running sessions pick up new skills/instructions (read at start only).
+                         Whatever a session was in the middle of is interrupted; nothing is lost
+                         from the session itself. --all = every workstream that has one
 
 workstreams
   ls [--group G] [--finished] [--json]
@@ -241,6 +246,8 @@ func run(args []string) int {
 		return c.dictate()
 	case "session":
 		return c.session(rest)
+	case "relaunch":
+		return c.relaunch(rest)
 	case "close":
 		return c.close(rest)
 	case "rm":
@@ -810,6 +817,42 @@ func (c *cli) close(args []string) int {
 }
 
 // ---------------------------------------------------------------- opencode sessions
+
+// relaunch is `jug relaunch --all | WS…`: restart opencode windows on their
+// pinned sessions, in place. Explicit by design — it interrupts the TUIs.
+func (c *cli) relaunch(args []string) int {
+	fs := flag.NewFlagSet("relaunch", flag.ContinueOnError)
+	all := fs.Bool("all", false, "every workstream that has an opencode window")
+	asJSON := fs.Bool("json", false, "")
+	pos, err := parseMixed(fs, args)
+	if err != nil || (*all && len(pos) > 0) || (!*all && len(pos) == 0) {
+		fmt.Fprintln(os.Stderr, "usage: jug relaunch --all | WS… [--json]")
+		return 2
+	}
+	rep, err := c.app.RelaunchAll(c.eng, pos)
+	if err != nil {
+		return fail(err)
+	}
+	if *asJSON {
+		b, _ := json.MarshalIndent(rep, "", "  ")
+		fmt.Println(string(b))
+	} else {
+		for _, id := range rep.Relaunched {
+			fmt.Printf("relaunched %s\n", id)
+		}
+		for _, sk := range rep.Skipped {
+			fmt.Printf("skipped    %s\n", sk)
+		}
+		for _, e := range rep.Errors {
+			fmt.Printf("error      %s\n", e)
+		}
+		fmt.Printf("%d relaunched, %d skipped, %d errors\n", len(rep.Relaunched), len(rep.Skipped), len(rep.Errors))
+	}
+	if len(rep.Errors) > 0 {
+		return 1
+	}
+	return 0
+}
 
 func (c *cli) session(args []string) int {
 	sub := "show"

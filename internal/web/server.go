@@ -146,6 +146,7 @@ func (s *Server) routes() {
 	m.HandleFunc("PUT /api/v1/workstreams/{ws}/session", s.sessionPut)
 	m.HandleFunc("DELETE /api/v1/workstreams/{ws}/session", s.sessionUnpin)
 	m.HandleFunc("POST /api/v1/workstreams/{ws}/session/relaunch", s.sessionRelaunch)
+	m.HandleFunc("POST /api/v1/relaunch", s.relaunchAll)
 }
 
 // ---------------------------------------------------------------- plumbing
@@ -892,6 +893,29 @@ func (s *Server) sessionRelaunch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// relaunchAll is POST /relaunch: restart every opencode window (or those of
+// the named workstreams) on their pinned sessions, in place. Body optional:
+// {workstreams: [...]}. Needs sway (503 otherwise). The report carries
+// what was done, skipped and failed; a failure on one is not a failure of
+// the request.
+func (s *Server) relaunchAll(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		Workstreams []string `json:"workstreams"`
+	}
+	if r.ContentLength != 0 {
+		if err := decode(r, &b); err != nil {
+			s.fail(w, err)
+			return
+		}
+	}
+	var rep app.RelaunchReport
+	if !s.engine(w, func(e *layout.Engine) (err error) { rep, err = s.app.RelaunchAll(e, b.Workstreams); return }) {
+		return
+	}
+	s.events.changed()
+	writeJSON(w, 200, rep)
 }
 
 // ---------------------------------------------------------------- groups

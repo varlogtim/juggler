@@ -136,7 +136,67 @@ func (a *App) SessionUnpin(w *store.Workstream) error {
 	return a.Store.Save(w)
 }
 
-// SessionRelaunch restarts w's opencode window on the pinned session.
+// SessionRelaunch restarts w's opencode window on the pinned session, in
+// place (displayed or parked).
 func (a *App) SessionRelaunch(e *layout.Engine, w *store.Workstream) error {
 	return e.RelaunchOpencode(w)
+}
+
+// RelaunchReport says what RelaunchAll did.
+type RelaunchReport struct {
+	Relaunched []string `json:"relaunched"`       // workstreams whose opencode window was restarted
+	Skipped    []string `json:"skipped"`          // "<id>: <why>" — no opencode window to restart
+	Errors     []string `json:"errors,omitempty"` // "<id>: <error>"; the others were still done
+}
+
+// RelaunchAll restarts the opencode window of every workstream that has
+// one — or of the named ones — each on its pinned session, the displayed
+// workstream first, parked ones in place in the lot. This is how running
+// sessions pick up new skills, instructions or an opencode upgrade: a
+// session only reads them at start. A workstream without an opencode window
+// is skipped, not started. One failure does not stop the rest.
+func (a *App) RelaunchAll(e *layout.Engine, only []string) (RelaunchReport, error) {
+	var rep RelaunchReport
+	var todo []*store.Workstream
+	if len(only) > 0 {
+		for _, q := range only {
+			w, err := a.Resolve(q)
+			if err != nil {
+				return rep, err
+			}
+			todo = append(todo, w)
+		}
+	} else {
+		all, err := a.Store.List()
+		if err != nil {
+			return rep, err
+		}
+		todo = all
+	}
+	// the one on screen first: it is the one being waited for
+	sort.SliceStable(todo, func(i, j int) bool {
+		return todo[i].Name() == e.State.Displayed && todo[j].Name() != e.State.Displayed
+	})
+	rep.Relaunched, rep.Skipped = []string{}, []string{}
+	for _, w := range todo {
+		tree, err := e.Sway.GetTree()
+		if err != nil {
+			return rep, err
+		}
+		if !e.HasOpencode(tree, w) {
+			switch live, _ := e.IsLive(tree, w); {
+			case live:
+				rep.Skipped = append(rep.Skipped, w.ID+": no opencode window (closed; `jug show` starts one)")
+			case len(only) > 0:
+				rep.Skipped = append(rep.Skipped, w.ID+": no windows")
+			}
+			continue // a workstream without windows is not a candidate unless named
+		}
+		if err := e.RelaunchOpencode(w); err != nil {
+			rep.Errors = append(rep.Errors, w.ID+": "+err.Error())
+			continue
+		}
+		rep.Relaunched = append(rep.Relaunched, w.ID)
+	}
+	return rep, nil
 }
