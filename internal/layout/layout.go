@@ -31,6 +31,15 @@
 // while tiling: it either targets the lotbox mark (stays intact) or hops
 // through the scratchpad as a floating unit and is tiled again on arrival.
 //
+// The shape is not sacred to sway or to the user: closing a stack's last
+// window reaps the stack (and its mark), moving the opencode window with
+// the keyboard promotes it to a bare child of the root at 50/50 or drops
+// it into the other stack, floating it twice does the same. The marks say
+// where things SHOULD be; the windows (app_id jug-oc:<name>,
+// jug-term:<name>) say where they ARE. ensure reconciles from the windows
+// (scripts/ensure-poc.sh has the facts), so a workstream never gets a
+// second opencode while one exists.
+//
 // Every multi-step sway change is sent as ONE command string, which sway
 // applies in one transaction (no intermediate frames).
 package layout
@@ -246,7 +255,8 @@ func (e *Engine) Show(w *store.Workstream, opt ShowOptions) error {
 	root := tree.ByMark(RootMark(name))
 	switch {
 	case root == nil:
-		// first time (or sway restarted / windows closed): build it
+		// first time (or sway restarted / windows closed): build it — around
+		// an opencode window that survived, when there is one
 		if err := e.build(w); err != nil {
 			return err
 		}
@@ -323,6 +333,7 @@ func (e *Engine) restore(tree *sway.Node, name string, onSlot bool, prevFocus *s
 		for _, n := range ws.Nodes {
 			cmds = append(cmds, sway.IDCrit(n.ID)+" move container to mark "+sway.Quote(RightMark(name)))
 		}
+		cmds = append(cmds, e.returnStrays(tree, name, ws.Nodes)...)
 	}
 	if !tree.InScratchpad(root.ID) {
 		cmds = append(cmds, rootC+" move scratchpad")
@@ -392,6 +403,9 @@ func (e *Engine) Reconcile() error {
 
 // build creates the windows and the tree shape for w (M0: F1–F5). It
 // switches to the slot workspace because `exec` spawns on the focused one.
+// An opencode window that survived without its root (the user closed the
+// other stack, or moved the window out) is adopted, not duplicated: it is
+// re-tiled at the top of the slot and the shape is built around it.
 func (e *Engine) build(w *store.Workstream) error {
 	name := w.Name()
 	tree, err := e.Sway.GetTree()
@@ -405,22 +419,52 @@ func (e *Engine) build(w *store.Workstream) error {
 	if err := e.cmd("workspace number " + sway.Quote(e.State.Slot.Name)); err != nil {
 		return err
 	}
-	// Strays: whatever already sits in the slot workspace. Focus the
-	// workspace node itself so the opencode view spawns at the top level.
-	if len(ws.Nodes) > 0 {
-		if err := e.cmd(sway.IDCrit(ws.Nodes[0].ID)+" focus", "focus parent"); err != nil {
+	ocID, termID := OpencodeAppID(name), "jug-term:"+name
+
+	// A surviving opencode window: hop it to the top of the slot. A floating
+	// container is tiled beside/into the slot's most recently focused tiling
+	// container, so the slot must hold none while it lands — tiling strays
+	// wait in the scratchpad and are adopted into the right stack below.
+	var held []int64
+	oc := tree.ByAppID(ocID)
+	if oc != nil {
+		if err := e.cmd(sway.IDCrit(oc.ID) + " move scratchpad"); err != nil {
 			return err
 		}
-	}
-
-	// 1. opencode, left
-	ocID := OpencodeAppID(name)
-	if err := e.cmd("exec " + e.terminalCmd(w, ocID, e.opencodeCmd(w))); err != nil {
-		return err
-	}
-	oc, err := e.waitAppID(ocID, 15*time.Second)
-	if err != nil {
-		return fmt.Errorf("opencode terminal did not appear: %w", err)
+		if tree, err = e.Sway.GetTree(); err != nil {
+			return err
+		}
+		var cmds []string
+		if ws = tree.WorkspaceNum(e.State.Slot.Num); ws != nil {
+			for _, n := range ws.Nodes {
+				cmds = append(cmds, sway.IDCrit(n.ID)+" move scratchpad")
+				held = append(held, n.ID)
+			}
+		}
+		cmds = append(cmds, sway.IDCrit(oc.ID)+" move container to workspace "+sway.Quote(e.State.Slot.Name),
+			sway.IDCrit(oc.ID)+" floating disable")
+		if err := e.cmd(cmds...); err != nil {
+			return err
+		}
+	} else {
+		// Strays: whatever already sits in the slot workspace. Focus the
+		// workspace node itself so the opencode view spawns at the top level.
+		if len(ws.Nodes) > 0 {
+			if err := e.cmd(sway.IDCrit(ws.Nodes[0].ID)+" focus", "focus parent"); err != nil {
+				return err
+			}
+		}
+		// 1. opencode, left
+		if err := e.EnsureSession(w); err != nil {
+			Notify("normal", "juggler", "opencode session: "+err.Error()+" — starting opencode without one")
+		}
+		before := viewIDs(tree, ocID)
+		if err := e.cmd("exec " + e.terminalCmd(w, ocID, e.opencodeCmd(w))); err != nil {
+			return err
+		}
+		if oc, err = e.waitNewView(ocID, before, 15*time.Second); err != nil {
+			return fmt.Errorf("opencode terminal did not appear: %w", err)
+		}
 	}
 	tree, _ = e.Sway.GetTree()
 	parent := tree.ParentOf(oc.ID)
@@ -437,12 +481,14 @@ func (e *Engine) build(w *store.Workstream) error {
 
 	// 2. terminal, right — spawned with the WORKSPACE focused so it lands
 	//    beside the opencode stack, not inside it
-	if err := e.cmd(sway.IDCrit(oc.ID)+" focus", "focus parent", "exec "+e.terminalCmd(w, "jug-term:"+name, "")); err != nil {
+	before := viewIDs(tree, termID)
+	if err := e.cmd(sway.IDCrit(oc.ID)+" focus", "focus parent", "exec "+e.terminalCmd(w, termID, "")); err != nil {
 		return err
 	}
 	// a plain terminal has no unique app_id we can wait for by name… so we
-	// gave it one
-	term, err := e.waitAppID("jug-term:"+name, 15*time.Second)
+	// gave it one — and wait for a NEW one, since every terminal of the
+	// workstream carries it
+	term, err := e.waitNewView(termID, before, 15*time.Second)
 	if err != nil {
 		return fmt.Errorf("terminal did not appear: %w", err)
 	}
@@ -461,15 +507,25 @@ func (e *Engine) build(w *store.Workstream) error {
 		sway.IDCrit(right.ID)+" mark --add "+sway.Quote(RightMark(name))); err != nil {
 		return err
 	}
-	// adopt strays into the right stack before wrapping
+	// adopt strays into the right stack before wrapping: what is still in
+	// the slot, and what waited in the scratchpad (floating now, so hopped)
 	tree, _ = e.Sway.GetTree()
 	ws = tree.WorkspaceNum(e.State.Slot.Num)
 	var adopt []string
+	var strays []*sway.Node
 	for _, n := range ws.Nodes {
 		if n.ID != left.ID && n.ID != right.ID {
 			adopt = append(adopt, sway.IDCrit(n.ID)+" move container to mark "+sway.Quote(RightMark(name)))
+			strays = append(strays, n)
 		}
 	}
+	for _, id := range held {
+		if n := tree.ByID(id); n != nil { // closed meanwhile otherwise
+			adopt = append(adopt, hopInto(id, right, e.State.Slot.Name)...)
+			strays = append(strays, n)
+		}
+	}
+	adopt = append(adopt, e.returnStrays(tree, name, strays)...)
 	if len(adopt) > 0 {
 		if err := e.cmd(adopt...); err != nil {
 			return err
@@ -492,10 +548,58 @@ func (e *Engine) build(w *store.Workstream) error {
 	)
 }
 
-// ensure repairs a displayed workstream whose stacks were closed by the
-// user (empty containers are reaped by sway, taking our marks with them).
-// Every batch ends by putting focus back where it was, so repairing a
-// workstream on a non-visible slot never switches what the user sees.
+// returnStrays returns the commands that send other workstreams' opencode
+// windows found among strays back to their own root (its left stack when it
+// still has one). Strays adopted into name's right stack can include such a
+// window — a workstream whose root was gone when it was parked left it
+// behind — and inside another workstream's stack it would be out of reach
+// of its own show. To be appended to the adoption batch: the ids survive
+// the move. Nothing when there are none.
+func (e *Engine) returnStrays(tree *sway.Node, name string, strays []*sway.Node) []string {
+	var cmds []string
+	for _, n := range strays {
+		for _, v := range n.Views() {
+			cmds = append(cmds, e.returnStray(tree, name, v)...)
+		}
+	}
+	return cmds
+}
+
+// returnStray is returnStrays for one view.
+func (e *Engine) returnStray(tree *sway.Node, name string, v *sway.Node) []string {
+	other, ok := strings.CutPrefix(v.AppID, "jug-oc:")
+	if !ok || other == name {
+		return nil
+	}
+	target := tree.ByMark(LeftMark(other))
+	if target == nil {
+		target = tree.ByMark(RootMark(other))
+	}
+	if target == nil {
+		return nil // no home to send it to; it stays a stray until its workstream is shown and built around it
+	}
+	ws := tree.WorkspaceOf(target.ID)
+	if ws == nil {
+		return nil
+	}
+	return hopInto(v.ID, target, ws.Name)
+}
+
+// ensure repairs a displayed workstream whose shape the user (or sway)
+// changed: a stack closed (empty containers are reaped, taking our marks
+// with them), the opencode window moved out of its stack, floated, left
+// bare in the root, or carried off into another workstream's stack. It
+// works from the WINDOWS, not the marks: the opencode window is found by
+// app_id and adopted wherever it is — a second one is never started while
+// one exists (two opencode TUIs on one session fight over it). Every batch
+// ends by putting focus back where it was, so repairing a workstream on a
+// non-visible slot never switches what the user sees.
+//
+// What sway does to the shape, verified by scripts/ensure-poc.sh: closing
+// a stack's last view reaps the stack but NOT the root (it keeps one
+// child); `move left/right` on a stack's only view promotes it to the root
+// as a bare view with the width fractions reset (that is the 50/50);
+// `floating toggle` twice lands it in the neighbouring stack.
 func (e *Engine) ensure(w *store.Workstream) error {
 	name := w.Name()
 	tree, err := e.Sway.GetTree()
@@ -506,8 +610,10 @@ func (e *Engine) ensure(w *store.Workstream) error {
 	left := tree.ByMark(LeftMark(name))
 	right := tree.ByMark(RightMark(name))
 	if root == nil && left == nil && right == nil {
-		return nil // nothing left; Show will rebuild next time
+		return nil // nothing left; Show will rebuild next time (build adopts a surviving opencode window)
 	}
+	ocID, termID := OpencodeAppID(name), "jug-term:"+name
+	slotWS := e.State.Slot.Name
 	prev := tree.FocusedNode()
 	focusedWS, _ := e.FocusedWorkspace()
 	onSlot := e.State.Slot != nil && focusedWS.Num == e.State.Slot.Num
@@ -526,7 +632,15 @@ func (e *Engine) ensure(w *store.Workstream) error {
 	run := func(focusNew *sway.Node, cmds ...string) error {
 		return e.cmd(append(cmds, tail(focusNew)...)...)
 	}
+	reread := func() error {
+		if tree, err = e.Sway.GetTree(); err != nil {
+			return err
+		}
+		root, left, right = tree.ByMark(RootMark(name)), tree.ByMark(LeftMark(name)), tree.ByMark(RightMark(name))
+		return nil
+	}
 
+	// 1. the root
 	if root == nil {
 		// re-wrap whatever survived
 		keep := left
@@ -536,7 +650,9 @@ func (e *Engine) ensure(w *store.Workstream) error {
 		if err := run(nil, sway.IDCrit(keep.ID)+" focus", "focus parent", "splith"); err != nil {
 			return err
 		}
-		tree, _ = e.Sway.GetTree()
+		if err := reread(); err != nil {
+			return err
+		}
 		p := tree.ParentOf(keep.ID)
 		if p == nil || p.IsWorkspace() {
 			return errors.New("could not re-wrap the workstream root")
@@ -544,72 +660,115 @@ func (e *Engine) ensure(w *store.Workstream) error {
 		if err := run(nil, sway.IDCrit(p.ID)+" mark --add "+sway.Quote(RootMark(name))); err != nil {
 			return err
 		}
-		root = p
-	}
-	if right == nil {
-		if left == nil {
-			return errors.New("cannot repair: both stacks are gone")
-		}
-		// Spawn with the LEFT STACK focused: the new view becomes its sibling
-		// inside the root (a new view is placed beside the focused node;
-		// `move container to mark` would instead resolve to a leaf and put
-		// it inside the other stack).
-		if err := run(nil, sway.IDCrit(left.ID)+" focus", "exec "+e.terminalCmd(w, "jug-term:"+name, "")); err != nil {
+		if err := reread(); err != nil {
 			return err
 		}
-		term, err := e.waitAppID("jug-term:"+name, 15*time.Second)
+	}
+
+	// 2. the right stack
+	if right == nil {
+		// Spawn with a child of the root focused: the new view becomes its
+		// sibling inside the root (a new view is placed beside the focused
+		// node; `move container to mark` would instead resolve to a leaf
+		// and put it inside the other stack). The left stack when it is
+		// there, else whatever the root still holds.
+		anchor := left
+		if anchor == nil {
+			if len(root.Nodes) == 0 {
+				return errors.New("cannot repair: the workstream root is empty")
+			}
+			anchor = root.Nodes[0]
+		}
+		before := viewIDs(tree, termID)
+		if err := run(nil, sway.IDCrit(anchor.ID)+" focus", "exec "+e.terminalCmd(w, termID, "")); err != nil {
+			return err
+		}
+		term, err := e.waitNewView(termID, before, 15*time.Second)
 		if err != nil {
 			return err
 		}
 		if err := run(nil, sway.IDCrit(term.ID)+" focus", "splitv", "layout stacking"); err != nil {
 			return err
 		}
-		tree, _ = e.Sway.GetTree()
-		if p := tree.ParentOf(term.ID); p != nil && !p.IsWorkspace() {
-			if err := run(term, sway.IDCrit(p.ID)+" mark --add "+sway.Quote(RightMark(name)),
-				sway.IDCrit(left.ID)+" resize set width "+strconv.Itoa(e.Cfg.LeftWidthPPT)+" ppt"); err != nil {
-				return err
-			}
+		if err := reread(); err != nil {
+			return err
+		}
+		p := tree.ParentOf(term.ID)
+		if p == nil || p.IsWorkspace() || p.ID == root.ID {
+			return errors.New("could not wrap the new terminal in a stack")
+		}
+		cmds := []string{sway.IDCrit(p.ID) + " mark --add " + sway.Quote(RightMark(name))}
+		if left != nil {
+			cmds = append(cmds, sway.IDCrit(left.ID)+" resize set width "+strconv.Itoa(e.Cfg.LeftWidthPPT)+" ppt")
+		}
+		if err := run(term, cmds...); err != nil {
+			return err
+		}
+		if err := reread(); err != nil {
+			return err
 		}
 	}
-	if left == nil {
-		// Same trick with the right stack focused; the new stack lands after
-		// it, so the two are swapped (`move right` would descend INTO the
-		// sibling stack rather than reorder).
-		right = tree.ByMark(RightMark(name))
-		if right == nil {
-			if tree, err = e.Sway.GetTree(); err != nil {
-				return err
-			}
-			right = tree.ByMark(RightMark(name))
-		}
-		if right == nil {
-			return errors.New("cannot repair: both stacks are gone")
-		}
+
+	// 3. opencode: the window, wherever it is; a new one only when there is none
+	oc := tree.ByAppID(ocID)
+	switch {
+	case oc == nil:
 		if err := e.EnsureSession(w); err != nil {
 			Notify("normal", "juggler", "opencode session: "+err.Error()+" — starting opencode without one")
 		}
-		ocID := OpencodeAppID(name)
+		before := viewIDs(tree, ocID)
 		if err := run(nil, sway.IDCrit(right.ID)+" focus", "exec "+e.terminalCmd(w, ocID, e.opencodeCmd(w))); err != nil {
 			return err
 		}
-		oc, err := e.waitAppID(ocID, 15*time.Second)
-		if err != nil {
+		if oc, err = e.waitNewView(ocID, before, 15*time.Second); err != nil {
 			return err
 		}
-		if err := run(nil, sway.IDCrit(oc.ID)+" focus", "splitv", "layout stacking"); err != nil {
+		if err := reread(); err != nil {
 			return err
 		}
-		tree, _ = e.Sway.GetTree()
-		if p := tree.ParentOf(oc.ID); p != nil && !p.IsWorkspace() {
-			if err := run(oc, sway.IDCrit(p.ID)+" mark --add "+sway.Quote(LeftMark(name)),
-				sway.IDCrit(p.ID)+" swap container with mark "+sway.Quote(RightMark(name)),
-				sway.IDCrit(p.ID)+" resize set width "+strconv.Itoa(e.Cfg.LeftWidthPPT)+" ppt"); err != nil {
-				return err
-			}
+	case left != nil && left.ByID(oc.ID) != nil:
+		// in its stack: only the order can be off (an earlier repair swapped
+		// a correct order into the wrong one)
+		if indexIn(root, left.ID) > indexIn(root, right.ID) {
+			return run(oc, sway.IDCrit(left.ID)+" swap container with mark "+sway.Quote(RightMark(name)),
+				sway.IDCrit(left.ID)+" resize set width "+strconv.Itoa(e.Cfg.LeftWidthPPT)+" ppt")
+		}
+		return nil
+	case left != nil:
+		// the window wandered (into the right stack, floating, another
+		// workspace, another workstream's root): bring it back
+		return run(oc, hopInto(oc.ID, left, slotWS)...)
+	}
+
+	// No left stack: build one around the window (just started, or found).
+	if p := tree.ParentOf(oc.ID); p == nil || p.ID != root.ID {
+		if err := run(nil, hopInto(oc.ID, root, slotWS)...); err != nil {
+			return err
+		}
+		if err := reread(); err != nil {
+			return err
 		}
 	}
-	return nil
+	// splitv wraps the view in a new container because it has a sibling
+	// (the right stack); on a singleton it would relayout the root instead
+	if err := run(nil, sway.IDCrit(oc.ID)+" focus", "splitv", "layout stacking"); err != nil {
+		return err
+	}
+	if err := reread(); err != nil {
+		return err
+	}
+	p := tree.ParentOf(oc.ID)
+	if p == nil || p.IsWorkspace() || p.ID == root.ID {
+		return errors.New("could not wrap the opencode window in a stack")
+	}
+	cmds := []string{sway.IDCrit(p.ID) + " mark --add " + sway.Quote(LeftMark(name))}
+	if indexIn(root, p.ID) != 0 {
+		// it landed after the right stack: swap the two (`move left` would
+		// descend INTO the sibling stack rather than reorder)
+		cmds = append(cmds, sway.IDCrit(p.ID)+" swap container with mark "+sway.Quote(RightMark(name)))
+	}
+	cmds = append(cmds, sway.IDCrit(p.ID)+" resize set width "+strconv.Itoa(e.Cfg.LeftWidthPPT)+" ppt")
+	return run(oc, cmds...)
 }
 
 // ---------------------------------------------------------------- park
@@ -640,11 +799,26 @@ func (e *Engine) parkTree(tree *sway.Node, name string) error {
 	onSlot := e.State.Slot != nil && focusedWS.Num == e.State.Slot.Num
 	rootC := sway.MarkCrit(RootMark(name))
 	var cmds []string
-	if e.inSlot(tree, root) && tree.ByMark(RightMark(name)) != nil {
-		for _, n := range tree.WorkspaceOf(root.ID).Nodes {
-			if n.ID != root.ID {
-				cmds = append(cmds, sway.IDCrit(n.ID)+" move container to mark "+sway.Quote(RightMark(name)))
+	if e.inSlot(tree, root) {
+		// the workstream's own opencode window travels with the root: bring
+		// it back in first when it wandered out (moved, floated, adopted
+		// elsewhere), else it would be left behind as a stray
+		if oc := tree.ByAppID(OpencodeAppID(name)); oc != nil && root.ByID(oc.ID) == nil {
+			target := tree.ByMark(LeftMark(name))
+			if target == nil {
+				target = root
 			}
+			cmds = append(cmds, hopInto(oc.ID, target, e.State.Slot.Name)...)
+		}
+		if tree.ByMark(RightMark(name)) != nil {
+			var strays []*sway.Node
+			for _, n := range tree.WorkspaceOf(root.ID).Nodes {
+				if n.ID != root.ID {
+					cmds = append(cmds, sway.IDCrit(n.ID)+" move container to mark "+sway.Quote(RightMark(name)))
+					strays = append(strays, n)
+				}
+			}
+			cmds = append(cmds, e.returnStrays(tree, name, strays)...)
 		}
 	}
 	floating := tree.InScratchpad(root.ID) || !e.tiling(tree, root)
@@ -810,8 +984,23 @@ func (e *Engine) Close(w *store.Workstream) error {
 	if err != nil {
 		return err
 	}
-	if root := tree.ByMark(RootMark(name)); root != nil {
-		if err := e.cmd(sway.MarkCrit(RootMark(name)) + " kill"); err != nil {
+	root := tree.ByMark(RootMark(name))
+	var cmds []string
+	if root != nil {
+		cmds = append(cmds, sway.MarkCrit(RootMark(name))+" kill")
+	}
+	// windows of this workstream that wandered out of the root (or survived
+	// it): the opencode window and its terminals carry the workstream's
+	// app_ids wherever they are
+	for _, v := range tree.FindAll(func(n *sway.Node) bool {
+		return n.AppID == OpencodeAppID(name) || n.AppID == "jug-term:"+name
+	}) {
+		if root == nil || root.ByID(v.ID) == nil {
+			cmds = append(cmds, sway.IDCrit(v.ID)+" kill")
+		}
+	}
+	if len(cmds) > 0 {
+		if err := e.cmd(cmds...); err != nil {
 			return err
 		}
 	}
@@ -1111,20 +1300,69 @@ func (e *Engine) terminalCmdTitled(w *store.Workstream, appID, title, command st
 	return b.String()
 }
 
-// waitAppID polls the tree until a view with appID exists.
-func (e *Engine) waitAppID(appID string, timeout time.Duration) (*sway.Node, error) {
+// viewIDs returns the ids of every view with appID — the set to pass to
+// waitNewView before exec'ing another one.
+func viewIDs(tree *sway.Node, appID string) map[int64]bool {
+	out := map[int64]bool{}
+	for _, n := range tree.FindAll(func(n *sway.Node) bool { return n.AppID == appID }) {
+		out[n.ID] = true
+	}
+	return out
+}
+
+// waitNewView polls the tree until a view with appID exists that is not in
+// before. app_ids are per workstream, not per window: a workstream's
+// terminals all carry jug-term:<name>, and an opencode window that was moved
+// out of its stack still carries jug-oc:<name>. Waiting for ANY view with
+// the id would hand back one of those — and the repair would then be applied
+// to the wrong window while the one just started lands wherever focus is.
+func (e *Engine) waitNewView(appID string, before map[int64]bool, timeout time.Duration) (*sway.Node, error) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		tree, err := e.Sway.GetTree()
 		if err != nil {
 			return nil, err
 		}
-		if n := tree.ByAppID(appID); n != nil {
-			return n, nil
+		for _, n := range tree.FindAll(func(n *sway.Node) bool { return n.AppID == appID }) {
+			if !before[n.ID] {
+				return n, nil
+			}
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return nil, fmt.Errorf("timeout waiting for window %q", appID)
+	return nil, fmt.Errorf("timeout waiting for a new window %q", appID)
+}
+
+// hopInto returns the commands that make the container id a child of
+// target, wherever id is now: tiling in another stack, floating, in the
+// scratchpad, on another workspace, inside another workstream's root. It
+// hops through the scratchpad (which detaches id from anything, as a
+// floating unit), lands on target's workspace, and is tiled with target
+// focused: sway tiles a floating container into the most recently focused
+// tiling container of its workspace (`seat_get_focus_inactive_tiling`), so
+// focusing a split container first makes id its child — deterministically,
+// unlike `floating disable` on its own. `move container to mark` would do
+// for a tiling id (it becomes the mark's child) but leaves a floating one
+// floating; this works for both. The caller ends the batch with the focus
+// it wants.
+func hopInto(id int64, target *sway.Node, wsName string) []string {
+	c := sway.IDCrit(id)
+	return []string{
+		c + " move scratchpad",
+		sway.IDCrit(target.ID) + " focus",
+		c + " move container to workspace " + sway.Quote(wsName),
+		c + " floating disable",
+	}
+}
+
+// indexIn returns the position of id among parent's tiling children, or -1.
+func indexIn(parent *sway.Node, id int64) int {
+	for i, c := range parent.Nodes {
+		if c.ID == id {
+			return i
+		}
+	}
+	return -1
 }
 
 // shellQuote quotes s for /bin/sh in a way sway's own command splitter also
@@ -1164,14 +1402,17 @@ func StateDirFor(cfg config.Config) (string, error) {
 	return cfg.StateDir, nil
 }
 
-// IsLive reports whether w currently has windows (displayed or parked).
-// parked is true when those windows are not tiling in the slot workspace.
+// IsLive reports whether w currently has windows (displayed or parked):
+// its root, or an opencode window that outlived the root. parked is true
+// when those windows are not tiling in the slot workspace.
 func (e *Engine) IsLive(tree *sway.Node, w *store.Workstream) (live bool, parked bool) {
-	root := tree.ByMark(RootMark(w.Name()))
-	if root == nil {
-		return false, false
+	if root := tree.ByMark(RootMark(w.Name())); root != nil {
+		return true, !e.inSlot(tree, root)
 	}
-	return true, !e.inSlot(tree, root)
+	if oc := tree.ByAppID(OpencodeAppID(w.Name())); oc != nil {
+		return true, !e.inSlot(tree, oc)
+	}
+	return false, false
 }
 
 // ShortDir abbreviates $HOME to ~ for display.

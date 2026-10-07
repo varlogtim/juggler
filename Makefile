@@ -51,6 +51,9 @@ poc:
 poc-lot:
 	scripts/lot-poc.sh
 
+poc-ensure:
+	scripts/ensure-poc.sh
+
 # Rename every live workspace "<name>" that lacks a number to "<N>:<name>",
 # where N comes from the $wsN variables in the sway config. Run once, after
 # editing the config to the N:name scheme and BEFORE `swaymsg reload`.
