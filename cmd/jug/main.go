@@ -87,6 +87,12 @@ inside the displayed workstream (default --ws: $JUG_WORKSTREAM, else the display
                          and how a window gets its port. Whatever a session was in the middle
                          of is interrupted; nothing is lost from the session itself.
                          --all = every workstream that has one
+  hibernate [--dry-run] [--json] [WS…]
+                         give back the memory finished work still holds: quit the opencode TUI
+                         (session kept; a note takes its place) and close the browser windows of
+                         parked, finished workstreams not shown for hibernate_after (config, 24h);
+                         jug serve does this by itself every 10 min. WS… = these ones, now.
+                         Never the displayed workstream, never a busy opencode. jug show wakes one
 
 workstreams
   ls [--group G] [--finished] [--json]
@@ -271,6 +277,8 @@ func run(args []string) int {
 		return c.session(rest)
 	case "relaunch":
 		return c.relaunch(rest)
+	case "hibernate":
+		return c.hibernate(rest)
 	case "close":
 		return c.close(rest)
 	case "rm":
@@ -877,6 +885,65 @@ func (c *cli) relaunch(args []string) int {
 	return 0
 }
 
+// hibernate is `jug hibernate [--dry-run] [WS…]`: one housekeeping pass by
+// hand — the due workstreams, or the named ones now.
+func (c *cli) hibernate(args []string) int {
+	fs := flag.NewFlagSet("hibernate", flag.ContinueOnError)
+	dry := fs.Bool("dry-run", false, "list what would happen")
+	asJSON := fs.Bool("json", false, "")
+	pos, err := parseMixed(fs, args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "usage: jug hibernate [--dry-run] [--json] [WS…]")
+		return 2
+	}
+	rep, err := c.app.Hibernate(context.Background(), c.eng, app.HibernateOptions{Only: pos, DryRun: *dry})
+	if err != nil {
+		return fail(err)
+	}
+	if *asJSON {
+		b, _ := json.MarshalIndent(rep, "", "  ")
+		fmt.Println(string(b))
+	} else {
+		verb := "hibernated"
+		if *dry {
+			verb = "would hibernate"
+		}
+		for _, h := range rep.Hibernated {
+			what := []string{}
+			if h.Opencode {
+				what = append(what, "quit opencode")
+			}
+			if h.Browsers > 0 {
+				what = append(what, fmt.Sprintf("close %d browser window(s)", h.Browsers))
+			}
+			if len(what) == 0 {
+				what = append(what, "nothing to close")
+			}
+			fmt.Printf("%-16s %s — %s (%s)\n", verb, h.ID, strings.Join(what, ", "), h.Why)
+		}
+		for _, sk := range rep.Skipped {
+			fmt.Printf("%-16s %s\n", "skipped", sk)
+		}
+		for _, e := range rep.Errors {
+			fmt.Printf("%-16s %s\n", "error", e)
+		}
+		if len(pos) == 0 && len(rep.Hibernated)+len(rep.Skipped)+len(rep.Errors) == 0 {
+			after, _ := c.app.Cfg.HibernateAfterDuration()
+			if after == 0 {
+				fmt.Println("hibernation is off (hibernate_after = 0 in config.toml)")
+			} else {
+				fmt.Printf("nothing is due (finished, parked and not shown for %s)\n", after)
+			}
+		} else {
+			fmt.Println(rep.Summary())
+		}
+	}
+	if len(rep.Errors) > 0 {
+		return 1
+	}
+	return 0
+}
+
 func (c *cli) session(args []string) int {
 	sub := "show"
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
@@ -1174,6 +1241,9 @@ func (c *cli) ls(args []string) int {
 		}
 		if in.Finished {
 			state += " ✓"
+		}
+		if in.Hibernated != "" {
+			state += " zz" // asleep: opencode quit, browsers closed; show wakes it
 		}
 		jira, pr := "", ""
 		for _, r := range in.Refs {

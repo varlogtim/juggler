@@ -37,6 +37,9 @@ type App struct {
 	// Scheduler is set when this process runs the source scheduler (jug
 	// serve), so statuses can say "running / next run".
 	Scheduler *Scheduler
+	// OnHibernate is called after a housekeeping pass that put workstreams
+	// to sleep (the web layer pushes a change event to browsers).
+	OnHibernate func(HibernateReport)
 
 	mu sync.Mutex
 }

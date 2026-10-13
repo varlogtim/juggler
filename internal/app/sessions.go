@@ -184,13 +184,26 @@ func (a *App) RelaunchAll(e *layout.Engine, only []string) (RelaunchReport, erro
 			return rep, err
 		}
 		if !e.HasOpencode(tree, w) {
-			switch live, _ := e.IsLive(tree, w); {
+			// No TUI to restart. Named explicitly, a live workstream gets one
+			// started (that is how a hibernated one is woken without
+			// showing it); under --all the asleep and the closed stay so.
+			live, _ := e.IsLive(tree, w)
+			asleep := e.State.Streams[w.Name()] != nil && e.State.Streams[w.Name()].Hibernated != ""
+			switch {
+			case live && len(only) > 0:
+				// fall through to RelaunchOpencode: ensure starts opencode
+			case live && asleep:
+				rep.Skipped = append(rep.Skipped, w.ID+": asleep (opencode quit to save memory; `jug show` or `jug relaunch "+w.ID+"` wakes it)")
+				continue
 			case live:
-				rep.Skipped = append(rep.Skipped, w.ID+": no opencode window (closed; `jug show` starts one)")
+				rep.Skipped = append(rep.Skipped, w.ID+": no opencode window (closed; `jug show` or `jug relaunch "+w.ID+"` starts one)")
+				continue
 			case len(only) > 0:
 				rep.Skipped = append(rep.Skipped, w.ID+": no windows")
+				continue
+			default:
+				continue // a workstream without windows is not a candidate unless named
 			}
-			continue // a workstream without windows is not a candidate unless named
 		}
 		if err := e.RelaunchOpencode(w); err != nil {
 			rep.Errors = append(rep.Errors, w.ID+": "+err.Error())

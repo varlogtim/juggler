@@ -51,6 +51,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -80,6 +81,11 @@ func RightMark(name string) string { return "jug:" + name + ":right" }
 func OpencodeAppID(name string) string {
 	return "jug-oc:" + name
 }
+
+// NoteAppID is the app_id of the terminal that takes a hibernated
+// workstream's opencode's place in the left stack, showing why it was quit.
+// ensure replaces it with opencode again on the next show.
+func NoteAppID(name string) string { return "jug-note:" + name }
 
 // LotMark is on the tabbed container that holds parked workstreams.
 const LotMark = "jug:lot"
@@ -728,13 +734,24 @@ func (e *Engine) ensure(w *store.Workstream) error {
 
 	// 3. opencode: the window, wherever it is; a new one only when there is none
 	oc := tree.ByAppID(ocID)
-	switch {
-	case oc == nil:
+	if oc == nil {
 		if err := e.EnsureSession(w); err != nil {
 			Notify("normal", "juggler", "opencode session: "+err.Error()+" — starting opencode without one")
 		}
+		// Where to spawn: a new view lands beside the focused node. With the
+		// right stack focused it becomes the root's child (a new left stack
+		// is built around it below); when a left stack survives without
+		// opencode — hibernated (the note is there), or the user kept
+		// another window in it — spawn with one of ITS views focused, so
+		// opencode lands inside that stack and no second one is built.
+		anchor := right
+		if left != nil {
+			if vs := left.Views(); len(vs) > 0 {
+				anchor = vs[0]
+			}
+		}
 		before := viewIDs(tree, ocID)
-		if err := run(nil, sway.IDCrit(right.ID)+" focus", "exec "+e.terminalCmd(w, ocID, e.opencodeCmd(w))); err != nil {
+		if err := run(nil, sway.IDCrit(anchor.ID)+" focus", "exec "+e.terminalCmd(w, ocID, e.opencodeCmd(w))); err != nil {
 			return err
 		}
 		if oc, err = e.waitNewView(ocID, before, 15*time.Second); err != nil {
@@ -743,6 +760,12 @@ func (e *Engine) ensure(w *store.Workstream) error {
 		if err := reread(); err != nil {
 			return err
 		}
+	}
+	// opencode is up: the hibernation note (if any) has done its job, and
+	// the workstream is no longer hibernated. Killed in a batch of its own,
+	// after the shape is right, so a failing focus cannot skip it.
+	defer e.dropNotes(w)
+	switch {
 	case left != nil && left.ByID(oc.ID) != nil:
 		// in its stack: only the order can be off (an earlier repair swapped
 		// a correct order into the wrong one)
@@ -1010,7 +1033,7 @@ func (e *Engine) Close(w *store.Workstream) error {
 	// it): the opencode window and its terminals carry the workstream's
 	// app_ids wherever they are
 	for _, v := range tree.FindAll(func(n *sway.Node) bool {
-		return n.AppID == OpencodeAppID(name) || n.AppID == "jug-term:"+name
+		return n.AppID == OpencodeAppID(name) || n.AppID == "jug-term:"+name || n.AppID == NoteAppID(name)
 	}) {
 		if root == nil || root.ByID(v.ID) == nil {
 			cmds = append(cmds, sway.IDCrit(v.ID)+" kill")
@@ -1285,9 +1308,11 @@ func (e *Engine) RetitleSession(w *store.Workstream) error {
 // RelaunchOpencode closes w's opencode window (if any) and starts it again
 // in place — with the currently pinned session — whether w is displayed or
 // parked in the lot, so a parked workstream comes back with its opencode
-// already up. A workstream without windows is left alone: its next show
-// starts opencode anyway. Killing the window ends the TUI process; the
-// session itself lives in opencode's store and `-s <id>` resumes it.
+// already up. A hibernated workstream (no opencode window, a note in its
+// place) gets its opencode back the same way. A workstream without windows
+// is left alone: its next show starts opencode anyway. Killing the window
+// ends the TUI process; the session itself lives in opencode's store and
+// `-s <id>` resumes it.
 func (e *Engine) RelaunchOpencode(w *store.Workstream) error {
 	name := w.Name()
 	tree, err := e.Sway.GetTree()
@@ -1327,6 +1352,129 @@ func (e *Engine) RelaunchOpencode(w *store.Workstream) error {
 // HasOpencode reports whether w's opencode window exists.
 func (e *Engine) HasOpencode(tree *sway.Node, w *store.Workstream) bool {
 	return tree.ByAppID(OpencodeAppID(w.Name())) != nil
+}
+
+// ---------------------------------------------------------------- hibernate
+
+// HibernateResult says what Hibernate did.
+type HibernateResult struct {
+	Opencode bool `json:"opencode"` // its opencode window was quit
+	Browsers int  `json:"browsers"` // browser windows closed
+}
+
+// Hibernate frees what a parked workstream still holds: its browser
+// windows are closed and its opencode TUI is quit — a terminal showing
+// note (one line per element) takes the TUI's place in the left stack, so
+// the tab says why when it is next looked at. The session is not touched:
+// `-s <id>` resumes it on the next show (ensure starts opencode inside the
+// left stack and drops the note). Terminals stay — a shell costs nothing.
+// Refused for the displayed workstream and for one whose window is
+// focused: those are in use. Nothing to do is not an error.
+func (e *Engine) Hibernate(w *store.Workstream, note []string) (HibernateResult, error) {
+	var res HibernateResult
+	name := w.Name()
+	if e.State.Displayed == name {
+		return res, fmt.Errorf("%s is displayed; park it first", w.ID)
+	}
+	tree, err := e.Sway.GetTree()
+	if err != nil {
+		return res, err
+	}
+	root := tree.ByMark(RootMark(name))
+	if root == nil {
+		return res, nil // no windows
+	}
+	prev := tree.FocusedNode()
+	if prev != nil && root.ByID(prev.ID) != nil {
+		return res, fmt.Errorf("%s has the focused window; it is in use", w.ID)
+	}
+	st := e.State.Stream(name)
+
+	// 1. the opencode TUI, with the note taking its place
+	if oc := tree.ByAppID(OpencodeAppID(name)); oc != nil {
+		if root.ByID(oc.ID) != nil {
+			noteID := NoteAppID(name)
+			before := viewIDs(tree, noteID)
+			cmds := []string{sway.IDCrit(oc.ID) + " focus", "exec " + e.noteCmd(w, note)}
+			if prev != nil {
+				cmds = append(cmds, sway.IDCrit(prev.ID)+" focus")
+			}
+			if err := e.cmd(cmds...); err != nil {
+				return res, err
+			}
+			if _, err := e.waitNewView(noteID, before, 15*time.Second); err != nil {
+				return res, fmt.Errorf("the note terminal did not appear; opencode left running: %w", err)
+			}
+		}
+		if err := e.cmd(sway.IDCrit(oc.ID) + " kill"); err != nil {
+			return res, err
+		}
+		res.Opencode = true
+	}
+
+	// 2. browser windows: inside the root, and the ones we opened for it
+	//    wherever they are now
+	kill := map[int64]bool{}
+	for _, v := range root.Views() {
+		if v.AppID == e.Cfg.BrowserAppID {
+			kill[v.ID] = true
+		}
+	}
+	for key, id := range st.Windows {
+		if tree.ByID(id) != nil {
+			kill[id] = true
+		}
+		delete(st.Windows, key)
+	}
+	if len(kill) > 0 {
+		var cmds []string
+		for id := range kill {
+			cmds = append(cmds, sway.IDCrit(id)+" kill")
+		}
+		sort.Strings(cmds)
+		if err := e.cmd(cmds...); err != nil {
+			return res, err
+		}
+		res.Browsers = len(kill)
+	}
+	st.Hibernated = time.Now().Format(time.RFC3339)
+	return res, e.save()
+}
+
+// noteCmd is the hibernation note's terminal: prints the lines and waits
+// for Enter, then exits (closing the window). No shell behind it — a shell
+// would be the memory the note is there to save.
+func (e *Engine) noteCmd(w *store.Workstream, lines []string) string {
+	var b strings.Builder
+	b.WriteString("printf '%s\\n'")
+	for _, l := range lines {
+		b.WriteString(" " + shellQuote(l))
+	}
+	b.WriteString("; read -r _")
+	return e.terminalCmdTitled(w, NoteAppID(w.Name()), "opencode is asleep — "+w.ID, b.String())
+}
+
+// dropNotes kills w's hibernation note windows and clears the hibernated
+// mark: called once opencode is running again.
+func (e *Engine) dropNotes(w *store.Workstream) {
+	name := w.Name()
+	tree, err := e.Sway.GetTree()
+	if err != nil {
+		return
+	}
+	var cmds []string
+	for _, v := range tree.FindAll(func(n *sway.Node) bool { return n.AppID == NoteAppID(name) }) {
+		cmds = append(cmds, sway.IDCrit(v.ID)+" kill")
+	}
+	if len(cmds) > 0 {
+		if err := e.cmd(cmds...); err != nil {
+			e.debugf("drop notes: %v", err)
+		}
+	}
+	if st := e.State.Streams[name]; st != nil && st.Hibernated != "" {
+		st.Hibernated = ""
+		_ = e.save()
+	}
 }
 
 // ---------------------------------------------------------------- helpers

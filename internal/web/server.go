@@ -73,6 +73,8 @@ func (s *Server) ListenAndServe(addr string) error {
 		s.events.publish("synced", rep.Source) // status only (last run moved)
 	}
 	go sched.Run(ctx)
+	s.app.OnHibernate = func(app.HibernateReport) { s.events.publish("changed", "hibernate") }
+	go s.app.HibernateLoop(ctx, s.Log)
 	srv := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	return srv.Serve(ln)
 }
@@ -150,6 +152,7 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/v1/workstreams/{ws}/say", s.say)
 	m.HandleFunc("GET /api/v1/sessions/status", s.sessionStatusAll)
 	m.HandleFunc("POST /api/v1/relaunch", s.relaunchAll)
+	m.HandleFunc("POST /api/v1/hibernate", s.hibernate)
 }
 
 // ---------------------------------------------------------------- plumbing
@@ -980,6 +983,30 @@ func (s *Server) say(w http.ResponseWriter, r *http.Request) {
 // {workstreams: [...]}. Needs sway (503 otherwise). The report carries
 // what was done, skipped and failed; a failure on one is not a failure of
 // the request.
+// hibernate is POST /hibernate: one housekeeping pass — the due
+// workstreams, or the named ones now. Body optional: {workstreams: [...]};
+// ?dry_run=true lists. Needs sway (503 otherwise).
+func (s *Server) hibernate(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		Workstreams []string `json:"workstreams"`
+	}
+	if r.ContentLength != 0 {
+		if err := decode(r, &b); err != nil {
+			s.fail(w, err)
+			return
+		}
+	}
+	opt := app.HibernateOptions{Only: b.Workstreams, DryRun: r.URL.Query().Get("dry_run") == "true"}
+	var rep app.HibernateReport
+	if !s.engine(w, func(e *layout.Engine) (err error) { rep, err = s.app.Hibernate(r.Context(), e, opt); return }) {
+		return
+	}
+	if !opt.DryRun && len(rep.Hibernated) > 0 {
+		s.events.changed()
+	}
+	writeJSON(w, 200, rep)
+}
+
 func (s *Server) relaunchAll(w http.ResponseWriter, r *http.Request) {
 	var b struct {
 		Workstreams []string `json:"workstreams"`

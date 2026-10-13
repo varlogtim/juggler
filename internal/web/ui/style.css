@@ -186,5 +186,6 @@ tbody tr.done td { opacity: .55; }
 tbody tr.done:hover td, tbody tr.done.selected td { opacity: .9; }
 tbody tr.done td.state { color: var(--brgreen); }
 .badge.done { border-color: var(--brgreen); color: #c0e07a; }
+.badge.asleep { border-color: var(--dim); color: var(--muted); }
 td.desc { max-width: 420px; }
 td.desc, td.desc * { overflow-wrap: anywhere; }

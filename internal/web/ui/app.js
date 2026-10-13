@@ -140,9 +140,9 @@ function rowHTML(it) {
   // "no code" matters for something you work on by hand; a synced ticket you
   // have not started simply has none yet
   const nocode = !it.has_code && !it.source ? raw(' <span class="badge nocode" title="no code dir: terminals start in the workstream dir">no code</span>') : '';
-  const finishedWhy = it.finished ? (it.completed ? 'completed by you ' + ago(it.completed) : 'ticket closed') + (it.state === 'none' ? '' : ' — still has windows; close them and it leaves the default view') : '';
+  const finishedWhy = it.finished ? (it.completed ? 'completed by you ' + ago(it.completed) : 'ticket closed') + (it.state === 'none' ? '' : it.hibernated ? ' — asleep: opencode quit and browsers closed ' + ago(it.hibernated) + ' to save memory; show it to wake it' : ' — still has windows; close them and it leaves the default view') : '';
   return h`<tr data-name="${it.name}" class="${it.state} ${S.selected === it.name ? 'selected' : ''} ${it.finished ? 'done' : ''}">
-    <td class="state" title="${it.state}${finishedWhy ? ' · ' + finishedWhy : ''}">${it.finished ? '✓' : stateGlyph(it.state)}</td>
+    <td class="state" title="${it.state}${it.hibernated ? ' · asleep' : ''}${finishedWhy ? ' · ' + finishedWhy : ''}">${it.hibernated ? 'z' : it.finished ? '✓' : stateGlyph(it.state)}</td>
     <td class="id">${it.id}</td>
     <td><span class="badge cat-${it.category}">${it.category}</span>${raw(groups)}</td>
     <td class="desc" title="${jiraTitle}">${it.desc}${nocode}</td>
@@ -278,7 +278,7 @@ function renderDetail() {
     <div class="d-head"><h2>${d.id}</h2><span class="desc">${d.desc}</span>
       <span class="badge cat-${d.category}">${d.category}</span>
       ${raw((d.groups || []).map(x => h`<span class="badge group">${x}</span>`).join(''))}
-      <span class="badge ${d.state}">${stateGlyph(d.state)} ${d.state}${d.shown ? ' · ' + ago(d.shown) : ''}</span>${d.finished ? raw(h`<span class="badge done" title="${d.completed ? 'completed by you ' + ago(d.completed) : 'the ticket is closed'}">✓ ${d.completed ? 'completed' : 'ticket closed'}</span>`) : ''}</div>
+      <span class="badge ${d.state}">${stateGlyph(d.state)} ${d.state}${d.shown ? ' · ' + ago(d.shown) : ''}</span>${d.finished ? raw(h`<span class="badge done" title="${d.completed ? 'completed by you ' + ago(d.completed) : 'the ticket is closed'}">✓ ${d.completed ? 'completed' : 'ticket closed'}</span>`) : ''}${d.hibernated ? raw(h`<span class="badge asleep" title="opencode quit and browser windows closed ${ago(d.hibernated)} to save memory; the session is kept — show or relaunch wakes it">z asleep</span>`) : ''}</div>
     <div class="d-sub">${short(d.dir)}${d.source ? raw(h` · <span class="badge src" title="created/maintained by source ${d.source}: ticket status, title and sprint tags are refreshed by it">source: ${d.source}</span>`) : ''}${d.owner ? raw(h` · <span class="badge owner">assigned to ${d.owner}</span>`) : ''}</div>
     <div class="d-actions sm">
       ${d.state === 'displayed' ? raw('<button data-act="focus">focus opencode</button><button data-act="park">park</button>') : raw('<button data-act="show" class="primary">show</button>')}
@@ -290,6 +290,7 @@ function renderDetail() {
       <button data-act="dictate" title="toggle dictation notes">dictate</button>
       ${live ? raw('<button data-act="close" title="kill its windows; files are kept">close windows</button>') : ''}
       ${d.completed ? raw('<button data-act="reopen" title="clear your completion mark">reopen</button>') : d.finished ? '' : raw('<button data-act="complete" title="mark done in juggler; the ticket is not touched. Hidden from the picker and the default view">✓ complete</button>')}
+      ${d.state === 'parked' && !d.hibernated ? raw('<button data-act="hibernate" title="quit its opencode (session kept; a note takes its place) and close its browser windows, now — jug serve does this by itself to finished workstreams after hibernate_after">z hibernate</button>') : ''}
     </div>
 
     <fieldset><legend>edit</legend>
@@ -434,6 +435,12 @@ async function act(name, what, el) {
       case 'sess-refresh': await loadSession(name, true); return;
       case 'complete': await POST(p + '/complete'); toast(`${name}: completed`, 'ok'); break;
       case 'reopen': await POST(p + '/reopen'); toast(`${name}: reopened`, 'ok'); break;
+      case 'hibernate': {
+        const r = await POST('/api/v1/hibernate', { workstreams: [name] });
+        if (r.hibernated.length) { const h = r.hibernated[0]; toast(`${name}: asleep — ${[h.opencode ? 'opencode quit' : '', h.browsers ? h.browsers + ' browser window(s) closed' : ''].filter(Boolean).join(', ') || 'nothing to close'}`, 'ok'); }
+        else toast((r.skipped[0] || r.errors[0] || 'nothing happened'), 'err');
+        break;
+      }
       case 'plan': { const plan = await GET(p + '/plan'); showPlan(plan); return; }
     }
     scheduleRefresh(50);

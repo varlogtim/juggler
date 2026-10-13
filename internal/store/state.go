@@ -35,6 +35,10 @@ type StreamState struct {
 	Pending []string `json:"pending,omitempty"`
 	// Shown is when the workstream was last displayed (for picker ordering).
 	Shown string `json:"shown,omitempty"`
+	// Hibernated is when its opencode was quit and its browser windows
+	// closed to save memory (RFC3339); cleared when opencode is started
+	// again. Only ever set while the workstream is parked.
+	Hibernated string `json:"hibernated,omitempty"`
 }
 
 // Stream returns (creating) the state for name.

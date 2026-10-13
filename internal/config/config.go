@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -65,6 +66,11 @@ type Config struct {
 	// Listen is the address `jug serve` binds (web UI + REST API). Keep it
 	// on loopback: the API runs commands as you, with no authentication.
 	Listen string `toml:"listen"`
+	// HibernateAfter: a finished workstream that is parked and has not been
+	// shown for this long gets its browser windows closed and its opencode
+	// quit (session kept) by `jug serve`, to give the memory back. A
+	// duration ("24h", "72h"); "0" or "" = never.
+	HibernateAfter string `toml:"hibernate_after"`
 	// Repos maps a short name (what `--repo` accepts) to a main checkout
 	// that owns .git; new worktrees are linked to it.
 	Repos map[string]Repo `toml:"repos"`
@@ -157,6 +163,20 @@ func (c Config) SeedDirFor(name string) string {
 	return ""
 }
 
+// HibernateAfterDuration parses HibernateAfter; 0 means never. A value
+// that is not a duration is reported, and treated as never.
+func (c Config) HibernateAfterDuration() (time.Duration, error) {
+	s := strings.TrimSpace(c.HibernateAfter)
+	if s == "" || s == "0" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("hibernate_after %q is not a duration (24h, 72h, 0)", c.HibernateAfter)
+	}
+	return d, nil
+}
+
 // Default returns the built-in configuration.
 func Default() Config {
 	home, _ := os.UserHomeDir()
@@ -178,6 +198,7 @@ func Default() Config {
 		JiraBaseURL:      "",
 		CodeSubdir:       "src",
 		Listen:           "127.0.0.1:7474",
+		HibernateAfter:   "24h",
 	}
 }
 

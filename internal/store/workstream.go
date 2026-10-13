@@ -39,6 +39,25 @@ type Ref struct {
 	Status  string    `toml:"status,omitempty" json:"status,omitempty"`   // cached external state, in the system's own words
 	Closed  bool      `toml:"closed,omitempty" json:"closed,omitempty"`   // the external item is finished (normalized by the source)
 	Updated time.Time `toml:"updated,omitempty" json:"updated,omitempty"` // when Status was last observed
+	// ClosedAt is when Closed was first observed true (zero while open, or
+	// for refs written before it was recorded — Updated stands in then).
+	ClosedAt time.Time `toml:"closed_at,omitempty" json:"closed_at,omitempty"`
+}
+
+// SetClosed records the external item's finished state, stamping ClosedAt
+// on the open->closed edge and clearing it on the way back. Reports
+// whether the flag changed.
+func (r *Ref) SetClosed(closed bool, now time.Time) bool {
+	if r.Closed == closed {
+		return false
+	}
+	r.Closed = closed
+	if closed {
+		r.ClosedAt = now
+	} else {
+		r.ClosedAt = time.Time{}
+	}
+	return true
 }
 
 // Workstream is the metadata file.
@@ -140,6 +159,27 @@ func (w *Workstream) TicketClosed() bool {
 // picker (unless they still have windows) and from the web UI's default
 // view.
 func (w *Workstream) Finished() bool { return !w.Completed.IsZero() || w.TicketClosed() }
+
+// FinishedSince is when the workstream became finished: the earlier of
+// your completion mark and the ticket closing (as recorded; a closed ref
+// from before ClosedAt existed counts from its last update). Zero when it
+// is not finished.
+func (w *Workstream) FinishedSince() time.Time {
+	var t time.Time
+	if !w.Completed.IsZero() {
+		t = w.Completed
+	}
+	if r := w.IdentityRef(); r != nil && r.Closed {
+		c := r.ClosedAt
+		if c.IsZero() {
+			c = r.Updated
+		}
+		if !c.IsZero() && (t.IsZero() || c.Before(t)) {
+			t = c
+		}
+	}
+	return t
+}
 
 // ResolvedCodeDir returns CodeDir expanded, or Dir when unset. A relative
 // CodeDir ("src/repo") lives inside the workstream directory.

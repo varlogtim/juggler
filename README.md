@@ -193,6 +193,18 @@ no ticket at all. Finished workstreams are hidden from the picker and from
 (*show finished* brings them back, dim and ✓, at the bottom of their
 group). `jug reopen` clears the mark; nothing is archived or deleted.
 
+**Asleep.** Finished work still costs memory while it is parked: its
+opencode TUI is a whole process holding its session, and they add up. So
+`jug serve` **hibernates** a workstream that is finished, parked, and has
+not been shown for `hibernate_after` (24h by default): its opencode is
+quit — a small terminal takes its place in the left stack and says why —
+and its browser windows are closed. The session is not touched, nothing is
+deleted, the terminals stay: `jug show` (or `jug relaunch WS`) wakes it
+with opencode back on the same session. Never the displayed workstream,
+never one whose window has focus, never an opencode that is mid-turn or
+waiting on a permission. `jug hibernate --dry-run` says what is due; `jug
+hibernate WS` does one now, finished or not.
+
 **The slot.** One workspace you choose, at any time, to be where workstreams
 are displayed. Toggling a workspace into the slot renames it (its label
 becomes `WS`); toggling again gives the name back. The slot is just a normal
@@ -391,6 +403,29 @@ jug relaunch AISW-53270     # just this one — same as `jug session --relaunch 
 Parked workstreams are relaunched in place in the lot; a workstream whose
 opencode you closed is skipped (`jug show` starts one), one without windows
 is not a candidate.
+
+### UC7d — Let finished work go to sleep
+
+```toml
+hibernate_after = "24h"     # config.toml; "0" = never
+```
+
+```sh
+jug hibernate --dry-run     # what is due: finished, parked, not shown for 24h — and what each would lose
+jug hibernate               # do it now (jug serve does this every 10 min by itself)
+jug hibernate tim-0005      # this one, now, finished or not
+jug ls                      # … parked ✓ zz …   = asleep; `jug show tim-0005` wakes it
+```
+
+What a sleeping workstream looks like in the lot: its tab is still there,
+terminals and all, but where opencode was a terminal reads *"juggler put
+this workstream to sleep to save memory … opencode was quit; its session is
+kept and resumes on the next show"* (Enter closes it). Its browser windows
+are gone — `jug open jira|pr` opens them again. The next `jug show` starts
+opencode on the pinned session inside that same stack and drops the note;
+`jug relaunch --all` leaves sleeping workstreams alone (`jug relaunch WS`
+wakes one). The service log says what it did and why
+(`journalctl --user -u juggler | grep hibernate`).
 
 ### UC7c — Talk to another workstream's session
 
@@ -681,6 +716,7 @@ jug session status [--ws WS | --all] [--json] idle | busy | retry, asked of the 
 jug say [--ws WS] [--wait | --draft] [--queue | --force] [--timeout D] [--json] TEXT… | -
                                  message the workstream's session through its live window (UC7c)
 jug relaunch --all | WS…         restart opencode window(s) on their pinned sessions, in place (parked ones too)
+jug hibernate [--dry-run] [WS…]  quit opencode (session kept) + close browsers of parked finished workstreams idle for hibernate_after; WS… = now
 jug ls [--group G] [--finished] [--json]   all workstreams (or those tagged G); finished ones only with --finished/--json
 jug complete WS | reopen WS      mark done in juggler (the ticket is not touched) / take it back
 jug add [--category C] [--id ID] [--jira KEY] [--pr URL] [--group G]… [--show] DESC…
@@ -803,6 +839,7 @@ Do not put it behind a reverse proxy.
 | `GET /sessions/status` | `jug session status --all` | `[…]` for every pinned session, in name order |
 | `POST /workstreams/{ws}/say` | `jug say` | `{text, mode: async\|wait\|draft, queue, force, timeout: "20m"}` → `{via: tui\|run, port, waited, reply, cost}`; `wait` holds the request for the reply; 409 `busy` / `no_live_tui`, 404 `no_session` |
 | `POST /relaunch` | `jug relaunch --all` · `jug relaunch WS…` | `{workstreams: [ws…]}` optional (default: every one with an opencode window) → `{relaunched, skipped, errors}`; 503 without sway |
+| `POST /hibernate?dry_run=true` | `jug hibernate [--dry-run] [WS…]` | `{workstreams: [ws…]}` optional (default: the due ones) → `{dry_run, hibernated: [{id, name, opencode, browsers, why}], skipped, errors}`; 503 without sway |
 
 `WorkstreamInfo` (also what `jug ls --json` prints):
 
@@ -812,7 +849,7 @@ Do not put it behind a reverse proxy.
   "code_dir": "src/ezaddon-mlis", "code_path": "/home/me/workstreams/…/src/ezaddon-mlis", "code_inside": true, "has_code": true,
   "refs": [{ "type": "jira", "key": "AISW-53270", "url": "https://…/browse/AISW-53270", "status": "Blocked" }],
   "groups": ["PCFS-S20-26.09.23-Nebula"], "source": "nebula", "owner": "",
-  "ticket_closed": false, "completed": "", "finished": false,
+  "ticket_closed": false, "completed": "", "finished": false, "finished_since": "", "hibernated": "",
   "opencode_session": "ses_…", "opencode_port": 45617, "state": "parked", "todos_open": 2, "shown": "2026-10-05T12:00:00-04:00",
   "git": { "root": "/home/me/workstreams/…/src/ezaddon-mlis", "branch": "tim/aisw-53270-…", "head": "48faeb67", "dirty": false, "linked": true, "main": "/home/me/src/ezaddon-mlis", "upstream": "origin/…", "ahead": 0, "behind": 0 } }
 ```
@@ -870,6 +907,7 @@ id_prefix        = "tim"                       # ids for workstreams without a t
 jira_base_url    = "https://yourcompany.atlassian.net"   # required for --jira / jira refs (no default)
 code_subdir      = "src"                       # <workstream>/src/<repo> for worktrees
 listen           = "127.0.0.1:7474"            # `jug serve` address (loopback only)
+hibernate_after  = "24h"                       # finished + parked + not shown this long -> opencode quit, browsers closed ("0" = never)
 
 # Top-level keys must come before any [table] (TOML).
 [repos.ezaddon-mlis]                           # what `--repo ezaddon-mlis` means
@@ -935,6 +973,7 @@ one message):
 | closing a stack's last window **reaps the stack and its mark**; the root keeps going with one child. `move left/right` on a stack's only window puts it *into* the neighbouring stack or promotes it to a **bare child of the root with the widths reset (50/50)**; `floating toggle` twice drops it into the neighbouring stack | the marks say where things *should* be, the windows (`jug-oc:<name>`, `jug-term:<name>`) say where they *are*. **ensure** reconciles from the windows: it finds the opencode window by app_id wherever it is and puts a `:left` stack around it, first, at ⅓ — and never starts a second opencode while one exists. Every `jug show`, `$mod+w` → *opencode*/*term*/*jira*/*pr* repairs the shape |
 | a floating container tiled with `floating disable` lands in the most recently focused *tiling* container of its workspace — a split container makes it its child | the **hop**: `move scratchpad; [target] focus; move container to workspace W; floating disable` makes a window a child of *target* from anywhere (another stack, floating, the lot, another workstream's root), deterministically. `move container to mark` would do for a tiling window but leaves a floating one floating |
 | `exec` is asynchronous and app_ids are per *workstream*: every terminal is `jug-term:<name>` and a moved opencode window still is `jug-oc:<name>` | after an `exec` juggler waits for a window with that app_id that **did not exist before** — waiting for *any* would hand it an older window and apply the repair to that one while the new one lands wherever focus is (that was the bug that duplicated opencode) |
+| exec with a *view* focused puts the new view beside that view, inside its stack (the same launch-context fact, one level down) | **hibernate** spawns the note with the opencode window focused — it lands in the left stack — then kills opencode, so the stack and its mark survive; **ensure** starts opencode again the same way, with the note focused, and drops the note. A left stack that outlives opencode is never doubled |
 | Chrome hands the URL to its running instance, so launch context is lost; the window lands wherever focus is | `jug open` subscribes to `window::new`, catches the new browser window and `move container to mark`s it into the right stack; its con_id is remembered so the next `open` of the same ref focuses it |
 | `rename workspace to "4:WS"` keeps the number; `workspace number "4:󰾗"` lands on `4:WS` | the slot label changes while `$mod+4` keeps working — hence the `N:label` naming requirement |
 | sway splits a command batch on `;` while tracking quotes, but an escaped quote directly followed by a quote (the shell idiom `'\''` ending a word) makes it hand the *rest of the batch* to `exec`'s shell | every argument juggler puts in an `exec` is quoted without backslashes: `'` becomes `'"'"'`, `\` becomes `'\\'` (`layout.ShellQuote`) |
@@ -950,7 +989,8 @@ before touching the tree, so focus is already back where it belongs.
 
 Runtime state (`~/.local/state/juggler/state.json`) holds what sway cannot
 tell us: which workspace is the slot and its original name, which workstream
-is displayed, the browser windows we opened per ref, and queued opens.
+is displayed, the browser windows we opened per ref, queued opens, when a
+workstream was last shown and whether it is asleep (`hibernated`).
 "Displayed" is re-derived from the tree (which root is tiling in the slot) on
 every run, so a show that fails halfway cannot leave the two disagreeing, and
 a stale state file is harmless: a workstream whose marks are gone is simply
@@ -995,6 +1035,17 @@ in another repo, a PR from another branch). The inventory it reads — the
 branch, the remote URL and the default branch per workstream — is built
 by the sync from git, once per main checkout per process. Refs on another
 host are left alone; a 404 (deleted PR) is a note, not a failure.
+
+**Housekeeping.** Besides the source polls, `jug serve` runs one more loop:
+a minute after start and every ten minutes it lists the workstreams, keeps
+the finished ones that are parked (a root in the tree, not displayed) and
+not yet asleep, and measures idle time from the later of *finished since*
+(the completion mark, or the ticket's recorded close — `closed_at` on the
+ref, stamped by the sync on the open→closed edge) and *last shown*. Those
+idle for `hibernate_after` are probed first (`jug session status`: busy,
+retry, or a permission pending → skipped, logged, retried next time) and
+then hibernated through the engine under the same mutex as every other
+window operation. Nothing is logged when nothing happened.
 
 **One service layer, three faces.** Every operation lives once, in
 `internal/app`, as a function that takes inputs and returns values. The CLI
@@ -1110,6 +1161,9 @@ that are not hotkeys.
 | 81 | UC7c | make B ask for a permission (e.g. `jug say --ws <B> "cat ~/tmp/hpe/secrets/jira.token"` with that path on `ask`); `jug session status --ws <B>`; then `jug say --ws <B> "x"` | status `busy  …  permission pending: external_directory …`; the second say is refused `busy` with the `--queue` / `--force` hints; answering the prompt in B's window ends the turn; `--queue` from before would have sent after that |
 | 82 | UC7c | `jug say` from A to A (no `--ws`); `jug say --ws <C>` where C has no windows; `jug say --ws <C> --wait "Reply pong."` | refused: `refusing to message the workstream this command runs in`; refused: `no live opencode window … jug show C … --wait`; the third runs `opencode run -s <C's session>` headless, prints `pong`, and the next `jug show C` shows that exchange in C's TUI |
 | 83 | web | `curl -s 127.0.0.1:7474/api/v1/sessions/status | jq .`; `curl -s -X POST 127.0.0.1:7474/api/v1/workstreams/<B>/say -d '{"text":"Reply pong.","mode":"wait","timeout":"2m"}' | jq .` | the same states as step 77 as JSON; the POST returns `{via: "tui", reply: "pong", …}` and the exchange is in B's window |
+| 84 | UC7d | `jug complete <parked ws that has a browser window>`; `jug hibernate --dry-run`; set `hibernate_after = "1m"` and restart the service (or `jug hibernate <ws>`) | the dry run lists it only once it has been finished/unshown for `hibernate_after` (with the default it does not, yet) and says `quit opencode, close N browser window(s)`; after the pass its tab in the lot has the note terminal where opencode was (title `opencode is asleep — <id>`), the browser windows are gone, `jug ls` shows `parked ✓ zz`, `jug ls --json` has `hibernated`, `journalctl --user -u juggler` has one `hibernate:` line naming it and why; your focus never moved |
+| 85 | UC7d | `jug relaunch --all`; `jug relaunch <ws>`; then `jug hibernate <ws>` and `jug show <ws>` | `--all` skips it (`asleep …`); named, it wakes: opencode back **inside the same left stack** (same container id), note gone, `hibernated` cleared; asleep again and shown, the same happens through the show; `pgrep -af "opencode -s <its session>"` shows exactly one TUI at every step |
+| 86 | UC7d | `jug hibernate <displayed ws>`; with a workstream's opencode mid-turn (`jug say --ws X "sleep 120 then reply ok"` on a finished parked X) `jug hibernate X`; `jug hibernate <ws with no windows>` | refused `displayed; park it first`; skipped `its opencode is busy` (and X is untouched); skipped `no windows` |
 
 Automated: `make test` (store naming/resolution, picker rows and the
 new-workstream spec, sway-safe shell quoting, group validation/ordering and
@@ -1121,7 +1175,9 @@ finished never created, prunable and prune, complete/reopen, ref updates
 never creating, tombstones by removal and by inference, forgive, dry run,
 an unreadable ledger, other sources' workstreams untouched — a monorepo
 worktree with a subdir code dir (seeds at the root, dirty guard and removal
-through git, `--subdir` validation), the service layer's store-only paths,
+through git, `--subdir` validation), the hibernation rules (finished,
+parked, idle, displayed and asleep excluded, the legacy closed ref) and the
+closed-at stamp, the service layer's store-only paths,
 and the HTTP API end to end against a temp store without sway). The
 sway mechanics are covered by `make poc`, `make poc-lot` and `make poc-ensure`; `make ui-shot`
 renders the UI headlessly (list + detail) and fails on console errors.
@@ -1198,6 +1254,12 @@ renders the UI headlessly (list + detail) and fails on console errors.
 - **opencode integration** (stage three): a skill so the assistant keeps `TODO.md`
   current, records follow-up tickets there, and calls `jug ref add` /
   `jug open pr` when it opens a PR.
+- **Hibernation measures idleness by "last shown"**, not by use: a parked
+  workstream you read in the lot without showing it counts as idle, so a
+  finished one can fall asleep under you a day later (a focused window is
+  the one thing that stops it). A real *last active* — shown, typed into,
+  TODO.md edited, session updated — is the next step; until then `jug show`
+  is the way to say "still using this".
 - Then: nvim picker (`:Jug`), notifications when CI goes red or a review
   arrives, a calendar importer, archiving finished workstreams (today they
-  are only hidden).
+  are hidden and put to sleep, not moved away).
