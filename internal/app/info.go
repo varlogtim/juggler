@@ -40,7 +40,9 @@ type WorkstreamInfo struct {
 	State           string      `json:"state"`                   // displayed | parked | none
 	TodosOpen       int         `json:"todos_open"`
 	Git             *GitInfo    `json:"git,omitempty"`
-	Shown           string      `json:"shown,omitempty"` // RFC3339, last displayed
+	Shown           string      `json:"shown,omitempty"`          // RFC3339, last displayed
+	FinishedSince   string      `json:"finished_since,omitempty"` // RFC3339: when it became finished (completed, or the ticket closed)
+	Hibernated      string      `json:"hibernated,omitempty"`     // RFC3339: parked with its opencode quit and browsers closed to save memory
 }
 
 // InfoOf builds the info for w. tree and st may be nil (no sway): state is
@@ -61,6 +63,9 @@ func (a *App) InfoOf(w *store.Workstream, tree *sway.Node, st *store.State) Work
 	if !w.Completed.IsZero() {
 		in.Completed = w.Completed.Format(time.RFC3339)
 	}
+	if fs := w.FinishedSince(); !fs.IsZero() {
+		in.FinishedSince = fs.Format(time.RFC3339)
+	}
 	if tree != nil && st != nil {
 		probe := &layout.Engine{Cfg: a.Cfg, State: st}
 		if live, parked := probe.IsLive(tree, w); live {
@@ -74,6 +79,9 @@ func (a *App) InfoOf(w *store.Workstream, tree *sway.Node, st *store.State) Work
 		}
 		if s := st.Streams[w.Name()]; s != nil {
 			in.Shown = s.Shown
+			if in.State == "parked" {
+				in.Hibernated = s.Hibernated
+			}
 		}
 	}
 	if gitwt.IsRepo(in.CodePath) {

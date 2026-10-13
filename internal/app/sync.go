@@ -512,12 +512,14 @@ func (a *App) Sync(ctx context.Context, src source.Source, opt SyncOptions) (*Re
 		}
 		if r := refOf(w, it.Ref.Type, it.Key); r != nil {
 			if r.Title != it.Ref.Title || r.Status != it.Ref.Status || r.URL != it.Ref.URL || r.Closed != it.Closed {
-				r.Title, r.Status, r.URL, r.Closed, r.Updated = it.Ref.Title, it.Ref.Status, it.Ref.URL, it.Closed, time.Now()
+				r.Title, r.Status, r.URL, r.Updated = it.Ref.Title, it.Ref.Status, it.Ref.URL, time.Now()
+				r.SetClosed(it.Closed, r.Updated)
 				changed = true
 			}
 		} else {
 			nr := it.Ref
-			nr.Closed, nr.Updated = it.Closed, time.Now()
+			nr.Updated = time.Now()
+			nr.SetClosed(it.Closed, nr.Updated)
 			w.Refs = append(w.Refs, nr)
 			changed = true
 		}
@@ -758,20 +760,23 @@ var (
 // Reports whether anything changed.
 func applyRef(w *store.Workstream, ru source.RefUpdate) bool {
 	nr := ru.Ref
-	nr.Closed = ru.Closed
+	now := time.Now()
 	for i := range w.Refs {
 		r := &w.Refs[i]
 		if r.Type != nr.Type || !((nr.Key != "" && r.Key == nr.Key) || (nr.URL != "" && r.URL == nr.URL)) {
 			continue
 		}
-		if r.Key == nr.Key && r.URL == nr.URL && r.Title == nr.Title && r.Status == nr.Status && r.Closed == nr.Closed {
+		if r.Key == nr.Key && r.URL == nr.URL && r.Title == nr.Title && r.Status == nr.Status && r.Closed == ru.Closed {
 			return false
 		}
-		nr.Updated = time.Now()
+		nr.ClosedAt, nr.Closed = r.ClosedAt, r.Closed // keep the recorded edge, then move it if the flag flips
+		nr.SetClosed(ru.Closed, now)
+		nr.Updated = now
 		*r = nr
 		return true
 	}
-	nr.Updated = time.Now()
+	nr.Updated = now
+	nr.SetClosed(ru.Closed, now)
 	w.Refs = append(w.Refs, nr)
 	return true
 }
