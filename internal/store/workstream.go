@@ -42,6 +42,86 @@ type Ref struct {
 	// ClosedAt is when Closed was first observed true (zero while open, or
 	// for refs written before it was recorded — Updated stands in then).
 	ClosedAt time.Time `toml:"closed_at,omitempty" json:"closed_at,omitempty"`
+	// Review is where an OPEN pull request stands with its reviewers, in
+	// juggler's vocabulary (see ReviewStates); "" for anything else. Set by
+	// the GitHub source; ReviewAt is when that state began (the request,
+	// the review, the push), ReviewBy who it is about (pending reviewers,
+	// the approver, the one who asked for changes).
+	Review   string    `toml:"review,omitempty" json:"review,omitempty"`
+	ReviewAt time.Time `toml:"review_at,omitempty" json:"review_at,omitempty"`
+	ReviewBy string    `toml:"review_by,omitempty" json:"review_by,omitempty"`
+}
+
+// ReviewStates is the vocabulary of Ref.Review, from most to least
+// pressing, with how each is shown. A pull request is in exactly one:
+//
+//	re-review         the author pushed and asked a reviewer who already reviewed to look again
+//	changes-requested a reviewer asked for changes and has not been asked again
+//	approved          approved by its reviewers: waiting on merge
+//	review-requested  reviewers asked, none has reviewed yet
+//	pushed            new commits since the last review, no re-review asked
+//	commented         reviewed with comments only
+var ReviewStates = []struct{ State, Glyph, Label string }{
+	{"re-review", "↻", "re-review requested"},
+	{"changes-requested", "✗", "changes requested"},
+	{"approved", "✔", "approved — waiting on merge"},
+	{"review-requested", "◌", "awaiting review"},
+	{"pushed", "↑", "pushed since the last review"},
+	{"commented", "…", "commented"},
+}
+
+// ReviewGlyph is the one-character form of r.Review ("" when none).
+func (r Ref) ReviewGlyph() string {
+	for _, s := range ReviewStates {
+		if s.State == r.Review {
+			return s.Glyph
+		}
+	}
+	return ""
+}
+
+// ReviewLabel is the spoken form of r.Review ("" when none).
+func (r Ref) ReviewLabel() string {
+	for _, s := range ReviewStates {
+		if s.State == r.Review {
+			return s.Label
+		}
+	}
+	return r.Review
+}
+
+// ReviewTag is the compact terminal form: "↻ re-review 2h" — glyph, state,
+// and how long it has been so ("" when there is no review state).
+func (r Ref) ReviewTag(now time.Time) string {
+	if r.Review == "" {
+		return ""
+	}
+	tag := r.ReviewGlyph() + " " + r.Review
+	if !r.ReviewAt.IsZero() {
+		tag += " " + Age(now.Sub(r.ReviewAt))
+	}
+	return tag
+}
+
+// Age renders a duration for people: 45m, 3h, 2d, 5w.
+func Age(d time.Duration) string {
+	switch {
+	case d < 0:
+		return "0m"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 48*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	case d < 21*24*time.Hour:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	default:
+		return fmt.Sprintf("%dw", int(d.Hours()/24/7))
+	}
+}
+
+// SameReview reports whether r and o agree on the review fields.
+func (r Ref) SameReview(o Ref) bool {
+	return r.Review == o.Review && r.ReviewBy == o.ReviewBy && r.ReviewAt.Equal(o.ReviewAt)
 }
 
 // SetClosed records the external item's finished state, stamping ClosedAt

@@ -54,6 +54,9 @@ func text(s Snapshot) string {
 		if r.Status != "" {
 			label += " " + r.Status
 		}
+		if tag := r.ReviewTag(time.Now()); tag != "" {
+			label += " " + tag
+		}
 		parts = append(parts, label)
 	}
 	if n := s.W.OpenTodos(); n > 0 {

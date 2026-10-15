@@ -118,10 +118,10 @@ func TestFinishedSinceAndClosedAt(t *testing.T) {
 	if !r.SetClosed(false, now) || !r.ClosedAt.IsZero() {
 		t.Fatalf("reopen clears ClosedAt: %+v", r)
 	}
-	if got := shortAge(30 * time.Hour); got != "30h" {
+	if got := store.Age(30 * time.Hour); got != "30h" {
 		t.Fatal(got)
 	}
-	if got := shortAge(9 * 24 * time.Hour); got != "9d" {
+	if got := store.Age(9 * 24 * time.Hour); got != "9d" {
 		t.Fatal(got)
 	}
 }

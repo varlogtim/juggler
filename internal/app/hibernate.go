@@ -117,9 +117,9 @@ func hibernateDue(all []*store.Workstream, st *store.State, tree *sway.Node, aft
 		if now.Sub(idleFrom) < after {
 			continue
 		}
-		why := "finished " + shortAge(now.Sub(since)) + " ago"
+		why := "finished " + store.Age(now.Sub(since)) + " ago"
 		if !shown.IsZero() {
-			why += ", not shown for " + shortAge(now.Sub(shown))
+			why += ", not shown for " + store.Age(now.Sub(shown))
 		} else {
 			why += ", never shown since"
 		}
@@ -233,20 +233,6 @@ func (a *App) hibernateNote(w *store.Workstream, why string) []string {
 		"  Press Enter to close this window.",
 	)
 	return lines
-}
-
-// shortAge renders an age for people: 45m, 3h, 2d, 5w.
-func shortAge(d time.Duration) string {
-	switch {
-	case d < time.Hour:
-		return fmt.Sprintf("%dm", int(d.Minutes()))
-	case d < 48*time.Hour:
-		return fmt.Sprintf("%dh", int(d.Hours()))
-	case d < 21*24*time.Hour:
-		return fmt.Sprintf("%dd", int(d.Hours()/24))
-	default:
-		return fmt.Sprintf("%dw", int(d.Hours()/24/7))
-	}
 }
 
 // HibernateLoop is `jug serve`'s housekeeping: a pass a minute after start,

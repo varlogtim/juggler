@@ -574,11 +574,16 @@ func (a *App) Sync(ctx context.Context, src source.Source, opt SyncOptions) (*Re
 			rep.Errors = append(rep.Errors, fmt.Sprintf("%s: ref without type/key: %+v", w.ID, ru.Ref))
 			continue
 		}
+		trans := reviewTransition(w, ru)
 		if !applyRef(w, ru) {
 			rep.Unchanged++
 			continue
 		}
-		rep.Refs = append(rep.Refs, w.ID+" "+ru.Ref.Key)
+		entry := w.ID + " " + ru.Ref.Key
+		if trans != "" {
+			entry += " " + trans
+		}
+		rep.Refs = append(rep.Refs, entry)
 		if !opt.DryRun {
 			if err := a.Store.Save(w); err != nil {
 				rep.Errors = append(rep.Errors, fmt.Sprintf("%s: %v", w.ID, err))
@@ -766,7 +771,7 @@ func applyRef(w *store.Workstream, ru source.RefUpdate) bool {
 		if r.Type != nr.Type || !((nr.Key != "" && r.Key == nr.Key) || (nr.URL != "" && r.URL == nr.URL)) {
 			continue
 		}
-		if r.Key == nr.Key && r.URL == nr.URL && r.Title == nr.Title && r.Status == nr.Status && r.Closed == ru.Closed {
+		if r.Key == nr.Key && r.URL == nr.URL && r.Title == nr.Title && r.Status == nr.Status && r.Closed == ru.Closed && r.SameReview(nr) {
 			return false
 		}
 		nr.ClosedAt, nr.Closed = r.ClosedAt, r.Closed // keep the recorded edge, then move it if the flag flips
@@ -779,6 +784,26 @@ func applyRef(w *store.Workstream, ru source.RefUpdate) bool {
 	nr.SetClosed(ru.Closed, now)
 	w.Refs = append(w.Refs, nr)
 	return true
+}
+
+// reviewTransition says how a ref update moves a PR's review state, for the
+// report: "" when unchanged, else "→ <state>" (or "→ none").
+func reviewTransition(w *store.Workstream, ru source.RefUpdate) string {
+	for _, r := range w.Refs {
+		if r.Type == ru.Ref.Type && ((ru.Ref.Key != "" && r.Key == ru.Ref.Key) || (ru.Ref.URL != "" && r.URL == ru.Ref.URL)) {
+			if r.Review == ru.Ref.Review {
+				return ""
+			}
+			if ru.Ref.Review == "" {
+				return "→ none"
+			}
+			return "→ " + ru.Ref.Review
+		}
+	}
+	if ru.Ref.Review != "" {
+		return "→ " + ru.Ref.Review
+	}
+	return ""
 }
 
 // createFromItem makes the workstream for a discovered item.

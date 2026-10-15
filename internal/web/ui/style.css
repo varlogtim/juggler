@@ -83,6 +83,15 @@ td.actions { white-space: nowrap; text-align: right; }
 .badge.cat-personal { border-color: var(--green); color: #c0e07a; }
 .badge.ref { font-family: var(--mono); font-size: 11px; }
 .badge.ref .st { color: var(--muted); margin-left: 4px; font-family: var(--sans); }
+/* pull-request review state (store.ReviewStates): a chip after the pr ref */
+.review { margin-left: 6px; padding: 0 5px; border-radius: 3px; font-family: var(--sans); font-size: 11px; color: var(--fg1); background: var(--bg2); white-space: nowrap; }
+.review.rv-re-review { color: #0a0a0a; background: #e0c04a; font-weight: 600; }          /* the ball is in the reviewer's court, by your ask */
+.review.rv-approved { color: #0a0a0a; background: #8fd67a; font-weight: 600; }           /* waiting on merge */
+.review.rv-changes-requested { color: #fff; background: #c04a4a; }                       /* blocked on you */
+.review.rv-review-requested { color: var(--fg1); background: var(--bg2); }
+.review.rv-pushed { color: #e0c04a; background: transparent; border: 1px solid #e0c04a; } /* you pushed; did you re-request? */
+.review.rv-commented { color: var(--muted); }
+.reflist .review { margin-left: 0; margin-right: 6px; }
 .badge.dirty { border-color: var(--yellow); color: #ffd75f; }
 .badge.nocode { border-color: var(--red); color: #ff87af; }
 .empty { padding: 40px; text-align: center; color: var(--muted); }
