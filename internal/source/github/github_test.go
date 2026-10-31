@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/varlogtim/juggler/internal/source"
 	"github.com/varlogtim/juggler/internal/store"
@@ -35,8 +36,21 @@ func fakeGitHub(t *testing.T) (*httptest.Server, *[]string) {
 	byNumber := map[string]map[string]any{
 		"/repos/acme/mono/pulls/7":   pr(7, "feature one", "open", false, "", "feat/one"),
 		"/repos/acme/other/pulls/42": pr(42, "backport", "closed", false, "2026-10-01T10:00:00Z", "backport/x"),
+		"/repos/acme/other/pulls/43": pr(43, "open but graphql-less", "open", false, "", "feat/x"),
 	}
 	byNumber["/repos/acme/other/pulls/42"]["html_url"] = "https://ghes.example.com/acme/other/pull/42"
+	// review facts by PR number, as the GraphQL query returns them
+	gql := map[float64]string{
+		7: `{"data":{"repository":{"pullRequest":{"isDraft":false,"state":"OPEN","reviewDecision":"REVIEW_REQUIRED","updatedAt":"2026-10-15T14:08:59Z",
+		     "author":{"login":"me"},"commits":{"nodes":[{"commit":{"oid":"c3","committedDate":"2026-10-15T13:46:17Z"}}]},
+		     "reviewRequests":{"nodes":[{"requestedReviewer":{"__typename":"User","login":"jerry"}}]},
+		     "reviews":{"nodes":[{"author":{"login":"jerry"},"state":"COMMENTED","submittedAt":"2026-10-14T20:20:20Z","commit":{"oid":"c2"}}]},
+		     "timelineItems":{"nodes":[{"__typename":"ReviewRequestedEvent","createdAt":"2026-10-14T19:51:49Z","requestedReviewer":{"__typename":"User","login":"jerry"}},
+		                               {"__typename":"PullRequestCommit","commit":{"oid":"c3","committedDate":"2026-10-15T13:46:17Z"}},
+		                               {"__typename":"ReviewRequestedEvent","createdAt":"2026-10-15T14:03:37Z","requestedReviewer":{"__typename":"User","login":"jerry"}}]}}}}}`,
+		9: `{"data":{"repository":{"pullRequest":{"isDraft":true,"state":"OPEN","reviewDecision":null,"updatedAt":"2026-10-15T14:08:59Z","author":{"login":"me"},
+		     "commits":{"nodes":[]},"reviewRequests":{"nodes":[]},"reviews":{"nodes":[]},"timelineItems":{"nodes":[]}}}}}`,
+	}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		asked = append(asked, r.URL.Path+"?"+r.URL.RawQuery)
 		if r.Header.Get("Authorization") != "token tok-gh" {
@@ -46,6 +60,18 @@ func fakeGitHub(t *testing.T) (*httptest.Server, *[]string) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		switch {
+		case r.URL.Path == "/api/graphql" && r.Method == "POST":
+			var q struct {
+				Variables map[string]any `json:"variables"`
+			}
+			json.NewDecoder(r.Body).Decode(&q)
+			n, _ := q.Variables["n"].(float64)
+			asked[len(asked)-1] = "graphql?n=" + itoa(int(n))
+			if body, ok := gql[n]; ok {
+				w.Write([]byte(body))
+			} else {
+				w.Write([]byte(`{"errors":[{"message":"Could not resolve to a PullRequest with the number of ` + itoa(int(n)) + `.","type":"NOT_FOUND"}]}`))
+			}
 		case r.URL.Path == "/api/v3/user":
 			json.NewEncoder(w).Encode(map[string]any{"login": "me"})
 		case r.URL.Path == "/api/v3/repos/acme/mono/pulls":
@@ -81,7 +107,7 @@ func itoa(n int) string { return strconv.Itoa(n) }
 
 func openTestSource(t *testing.T, ts *httptest.Server, extra map[string]any) source.Source {
 	t.Helper()
-	cfg := map[string]any{"kind": "github", "base_url": "https://ghes.example.com", "api_url": ts.URL + "/api/v3", "token": "tok-gh"}
+	cfg := map[string]any{"kind": "github", "base_url": "https://ghes.example.com", "api_url": ts.URL + "/api/v3", "graphql_url": ts.URL + "/api/graphql", "token": "tok-gh"}
 	for k, v := range extra {
 		cfg[k] = v
 	}
@@ -93,6 +119,8 @@ func openTestSource(t *testing.T, ts *httptest.Server, extra map[string]any) sou
 				c.BaseURL = v.(string)
 			case "api_url":
 				c.APIURL = v.(string)
+			case "graphql_url":
+				c.GQLURL = v.(string)
 			case "token":
 				c.Token = v.(string)
 			case "poll":
@@ -148,13 +176,17 @@ func TestPullRefs(t *testing.T) {
 	if r := got["work_A-1_one acme/mono#7"]; r.Ref.Status != "open" || r.Ref.Title != "feature one" || r.Closed || r.Ref.URL != "https://ghes.example.com/acme/mono/pull/7" {
 		t.Fatalf("A-1: %+v", r)
 	}
-	if r := got["work_A-2_two acme/mono#9"]; r.Ref.Status != "draft" || r.Closed {
+	// #7 is open: its review state comes from GraphQL — a re-review asked of jerry at 14:03
+	if r := got["work_A-1_one acme/mono#7"]; r.Ref.Review != "re-review" || r.Ref.ReviewBy != "jerry" || r.Ref.ReviewAt.Format(time.RFC3339) != "2026-10-15T14:03:37Z" {
+		t.Fatalf("A-1 review: %q %q %v", r.Ref.Review, r.Ref.ReviewBy, r.Ref.ReviewAt)
+	}
+	if r := got["work_A-2_two acme/mono#9"]; r.Ref.Status != "draft" || r.Closed || r.Ref.Review != "" {
 		t.Fatalf("A-2 #9: %+v", r)
 	}
-	if r := got["work_A-2_two acme/mono#8"]; r.Ref.Status != "closed" || !r.Closed {
+	if r := got["work_A-2_two acme/mono#8"]; r.Ref.Status != "closed" || !r.Closed || r.Ref.Review != "" {
 		t.Fatalf("A-2 #8: %+v", r)
 	}
-	if r := got["work_A-4_else acme/other#42"]; r.Ref.Status != "merged" || !r.Closed || r.Ref.Title != "backport" {
+	if r := got["work_A-4_else acme/other#42"]; r.Ref.Status != "merged" || !r.Closed || r.Ref.Title != "backport" || r.Ref.Review != "" {
 		t.Fatalf("A-4: %+v", r)
 	}
 	if len(snap.Items) != 0 || len(snap.Groups) != 0 {
@@ -162,17 +194,18 @@ func TestPullRefs(t *testing.T) {
 	}
 	// request discipline: one list per branch looked up, one GET per uncovered ref, no GET for #7
 	paths := strings.Join(*asked, "\n")
-	for _, want := range []string{"/api/v3/user?", "pulls?", "head=acme%3Afeat%2Fone", "head=acme%3Afeat%2Ftwo", "head=acme%3Afeat%2Fnone", "/repos/acme/other/pulls/42?"} {
+	for _, want := range []string{"/api/v3/user?", "pulls?", "head=acme%3Afeat%2Fone", "head=acme%3Afeat%2Ftwo", "head=acme%3Afeat%2Fnone", "/repos/acme/other/pulls/42?", "graphql?n=7"} {
 		if !strings.Contains(paths, want) {
 			t.Errorf("missing request %q in:\n%s", want, paths)
 		}
 	}
-	for _, dont := range []string{"head=acme%3Adevelop", "head=acme%3Amain", "/repos/acme/mono/pulls/7?", "someone"} {
+	// review facts only for OPEN, non-draft pull requests: not the draft #9, the closed #8, the merged #42
+	for _, dont := range []string{"head=acme%3Adevelop", "head=acme%3Amain", "/repos/acme/mono/pulls/7?", "someone", "graphql?n=8", "graphql?n=9", "graphql?n=42"} {
 		if strings.Contains(paths, dont) {
 			t.Errorf("unwanted request %q in:\n%s", dont, paths)
 		}
 	}
-	if !strings.Contains(snap.Notes[0], "as me: 3 pull request(s) for 3 branch(es), 1 by ref") {
+	if !strings.Contains(snap.Notes[0], "as me: 3 pull request(s) for 3 branch(es), 1 by ref, review state of 1 open") {
 		t.Fatalf("note: %q", snap.Notes[0])
 	}
 	if d := src.Describe(); !strings.Contains(d, "ghes.example.com") || !strings.Contains(d, "pr refs") {
@@ -195,6 +228,21 @@ func TestPullRefs(t *testing.T) {
 		t.Fatalf("refs with filter: %+v", snap.Refs)
 	}
 	if n := strings.Join(snap.Notes, "\n"); !strings.Contains(n, "skipped A-6 (acme/mono#404): github /repos/acme/mono/pulls/404: HTTP 404") {
+		t.Fatalf("notes: %s", n)
+	}
+
+	// a review lookup that fails keeps what the workstream's ref already
+	// says: #43 is served by REST (open) but unknown to the fake GraphQL
+	gqlDown := view("work_A-7_down", "A-7", "feat/x", "git@github.com:elsewhere/x.git", "",
+		store.Ref{Type: "pr", Key: "acme/other#43", URL: "https://ghes.example.com/acme/other/pull/43", Status: "open", Review: "approved", ReviewBy: "ann"})
+	snap, err = src.Pull(context.Background(), source.Inventory{Workstreams: []source.WorkstreamView{gqlDown}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Refs) != 1 || snap.Refs[0].Ref.Review != "approved" || snap.Refs[0].Ref.ReviewBy != "ann" {
+		t.Fatalf("failed review lookup should keep the recorded state: %+v", snap.Refs)
+	}
+	if n := strings.Join(snap.Notes, "\n"); !strings.Contains(n, "skipped review state of acme/other#43: github graphql acme/other#43: Could not resolve") {
 		t.Fatalf("notes: %s", n)
 	}
 }

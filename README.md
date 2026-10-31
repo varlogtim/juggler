@@ -114,6 +114,23 @@ hand; sources keep them fresh — the Jira source its tickets' refs, the GitHub
 source every `pr` ref (and it attaches the PR for a workstream's branch when
 none is recorded yet).
 
+An **open pull request** also carries where it stands with its reviewers —
+`review`, with `review_by` (who it is about) and `review_at` (since when),
+one of, most pressing first:
+
+| state | glyph | meaning | what it means for you |
+|---|---|---|---|
+| `re-review` | ↻ | you pushed and asked a reviewer who already reviewed to look again | the ball is in their court — by your ask |
+| `changes-requested` | ✗ | a reviewer asked for changes and has not been asked again | blocked on you |
+| `approved` | ✔ | approved by its reviewers | **waiting on merge** |
+| `review-requested` | ◌ | reviewers asked, none has reviewed yet | waiting |
+| `pushed` | ↑ | new commits since the last review, no re-review asked | did you forget to re-request? |
+| `commented` | … | reviewed with comments only | read them |
+
+Shown as `PR#1378 open ↻ re-review 2h` in the picker, `jug ls` and the bar,
+and as a coloured chip after the ref in the web UI (hover: who and since
+when). Drafts, merged and closed pull requests have no review state.
+
 **Groups.** A group is any bucket you want to see workstreams by — a sprint,
 a project, a date range, "backlog". It has two halves, kept apart on purpose:
 
@@ -673,9 +690,13 @@ jug ls                      # PR column: open | draft | merged | closed, from Gi
 What you get: every `pr` ref on that host refreshed (title and state) each
 hour, and — for a workstream whose checkout is on a branch of its own —
 the pull requests of that branch attached as `pr` refs the moment they
-exist, without `jug ref add`. A merged PR shows `merged` but does not
-finish the workstream: the ticket does that (the fix may still need a
-backport, QA, a release note). Nothing is created or adopted by this
+exist, without `jug ref add`. For each **open** one, where it stands with
+its reviewers (the table under *Refs* in Concepts): the moment you push and
+click *re-request review* the row says `↻ re-review 5m`; when the approval
+lands it says `✔ approved` — waiting on merge — and the sync report names
+the transition (`refs refreshed: AISW-53606 hpe/aie#1378 → approved`). A
+merged PR shows `merged` but does not finish the workstream: the ticket
+does that (the fix may still need a backport, QA, a release note). Nothing is created or adopted by this
 source; it is `jug source ls`'s second row, with the same ledger, chip
 and `jug sync` as the Jira one. Shared main checkouts on their default
 branch are not looked up (that branch is nobody's PR), and a ref whose URL
@@ -847,7 +868,8 @@ Do not put it behind a reverse proxy.
 { "name": "work_AISW-53270_disagg-toggle-requires-pause", "id": "AISW-53270", "category": "work",
   "desc": "disagg toggle requires pause", "created": "…", "dir": "/home/me/workstreams/work_AISW-53270_…",
   "code_dir": "src/ezaddon-mlis", "code_path": "/home/me/workstreams/…/src/ezaddon-mlis", "code_inside": true, "has_code": true,
-  "refs": [{ "type": "jira", "key": "AISW-53270", "url": "https://…/browse/AISW-53270", "status": "Blocked" }],
+  "refs": [{ "type": "jira", "key": "AISW-53270", "url": "https://…/browse/AISW-53270", "status": "Blocked" },
+           { "type": "pr", "key": "hpe/aie#1321", "url": "https://…/pull/1321", "status": "open", "review": "re-review", "review_by": "jerry-harrow", "review_at": "2026-10-15T14:03:37Z" }],
   "groups": ["PCFS-S20-26.09.23-Nebula"], "source": "nebula", "owner": "",
   "ticket_closed": false, "completed": "", "finished": false, "finished_since": "", "hibernated": "",
   "opencode_session": "ses_…", "opencode_port": 45617, "state": "parked", "todos_open": 2, "shown": "2026-10-05T12:00:00-04:00",
@@ -942,6 +964,7 @@ kind     = "github"
 base_url = "https://github.example.com"        # the web host (github.com, or a GitHub Enterprise Server)
 token    = "file:~/secrets/github.token"       # a token that can read the repos (`repo` scope on GHES)
 # api_url = ""                                 # default: <base_url>/api/v3, or https://api.github.com
+# graphql_url = ""                             # default: <base_url>/api/graphql, or https://api.github.com/graphql
 # repos   = ["org/repo"]                       # restrict branch lookups to these; default: the checkouts' remotes on this host
 poll     = "1h"
 ```
@@ -1031,10 +1054,21 @@ whose checkout's remote is on the source's host and whose branch is not
 the repo's default, `pulls?state=all&head=<owner>:<branch>` (one request;
 every PR of that branch becomes a `pr` ref update), then one
 `pulls/{n}` per `pr` ref on that host the lists did not cover (a backport
-in another repo, a PR from another branch). The inventory it reads — the
-branch, the remote URL and the default branch per workstream — is built
-by the sync from git, once per main checkout per process. Refs on another
-host are left alone; a 404 (deleted PR) is a note, not a failure.
+in another repo, a PR from another branch), then one **GraphQL** request
+per open, non-draft pull request for its review facts: GitHub's own
+`reviewDecision`, the pending `reviewRequests`, the `reviews` so far, the
+head commit, and the recent `timelineItems` — the only place a review
+*request* carries a timestamp. (`latestReviews` is a trap: it omits a
+reviewer with a pending request, i.e. the one a re-review is about.) The
+state is derived from those facts in one pure function, most pressing
+first: changes requested by someone not asked again → re-review (a pending
+request to someone who reviewed before) → approved → awaiting a first
+review → pushed since the last review → commented; the author's own
+reviews are not reviews, a dismissal clears a standing. A failed lookup
+keeps the state last recorded. The inventory it reads — the branch, the
+remote URL and the default branch per workstream — is built by the sync
+from git, once per main checkout per process. Refs on another host are
+left alone; a 404 (deleted PR) is a note, not a failure.
 
 **Housekeeping.** Besides the source polls, `jug serve` runs one more loop:
 a minute after start and every ten minutes it lists the workstreams, keeps
@@ -1164,13 +1198,20 @@ that are not hotkeys.
 | 84 | UC7d | `jug complete <parked ws that has a browser window>`; `jug hibernate --dry-run`; set `hibernate_after = "1m"` and restart the service (or `jug hibernate <ws>`) | the dry run lists it only once it has been finished/unshown for `hibernate_after` (with the default it does not, yet) and says `quit opencode, close N browser window(s)`; after the pass its tab in the lot has the note terminal where opencode was (title `opencode is asleep — <id>`), the browser windows are gone, `jug ls` shows `parked ✓ zz`, `jug ls --json` has `hibernated`, `journalctl --user -u juggler` has one `hibernate:` line naming it and why; your focus never moved |
 | 85 | UC7d | `jug relaunch --all`; `jug relaunch <ws>`; then `jug hibernate <ws>` and `jug show <ws>` | `--all` skips it (`asleep …`); named, it wakes: opencode back **inside the same left stack** (same container id), note gone, `hibernated` cleared; asleep again and shown, the same happens through the show; `pgrep -af "opencode -s <its session>"` shows exactly one TUI at every step |
 | 86 | UC7d | `jug hibernate <displayed ws>`; with a workstream's opencode mid-turn (`jug say --ws X "sleep 120 then reply ok"` on a finished parked X) `jug hibernate X`; `jug hibernate <ws with no windows>` | refused `displayed; park it first`; skipped `its opencode is busy` (and X is untouched); skipped `no windows` |
+| 87 | UC16 | on a workstream with an open PR: push a commit and click *re-request review* on GitHub; `jug sync github`; `jug ls`; `$mod+t`; web UI | the report says `refs refreshed: <ws> <repo#n> → re-review`; `jug ls` shows `(open ↻ re-review Nm)` with N counted from the click, the picker row `PR#n open ↻ re-review Nm`, the bar the same; the UI row has a yellow `↻ re-review` chip whose hover reads `re-review requested from <reviewer> · Nm ago`; `workstream.toml` has `review`, `review_at`, `review_by` on the ref |
+| 88 | UC16 | the reviewer approves; sync; then merge; sync | `→ approved`: `✔ approved` everywhere (green chip, hover `approved — waiting on merge by <reviewer>`), `review_at` = the approval time; after the merge the status is `merged` and the chip is gone (`review` empty, report `→ none`) |
+| 89 | UC16 | the reviewer requests changes; sync; push a fix *without* re-requesting; sync; re-request; sync | `✗ changes-requested` (red); then still `✗` (a push does not clear a block); then `↻ re-review` |
+| 90 | UC16 | a fresh PR with a reviewer requested and no review yet; sync; a PR reviewed with comments only, then a push; sync | `◌ review-requested` since the request; `↑ pushed` since the head commit (hover `after a review by <reviewer>`) |
 
 Automated: `make test` (store naming/resolution, picker rows and the
 new-workstream spec, sway-safe shell quoting, group validation/ordering and
 the registry, the Jira connector against a fake Jira server — pagination,
 owner detection, sprint→group rules, local dates, URLs — the GitHub connector against a fake API — branch lookups, by-ref
 refreshes, host and default-branch rules, request discipline, remote URL
-forms — the sync rules against a fake source — create/adopt/refresh/regroup,
+forms, the review-state derivation (a table of the shapes seen live: first
+request, re-review after a push, changes requested with and without a
+re-request, approval, dismissal, two approvers, no protection rule, a team)
+and a failed lookup keeping the recorded state — the sync rules against a fake source — create/adopt/refresh/regroup,
 finished never created, prunable and prune, complete/reopen, ref updates
 never creating, tombstones by removal and by inference, forgive, dry run,
 an unreadable ledger, other sources' workstreams untouched — a monorepo
@@ -1234,12 +1275,15 @@ renders the UI headlessly (list + detail) and fails on console errors.
   workstream, `$mod+w` → *opencode*, or any other `jug` action on it. A
   service-side reconciliation on sway window events is the obvious next
   step; today the repair is one keystroke away.
-- **The GitHub source knows state, not health.** A `pr` ref says open /
-  draft / merged / closed and its title; review decisions, CI checks and
-  mergeability (what `merger` tracks) are not pulled yet — the ref would
-  grow fields, the connector a few requests. PRs are found by branch, so a
-  PR opened from a branch the workstream is not on must still be `jug ref
-  add`ed once (it is refreshed from then on).
+- **The GitHub source knows review state, not CI.** A `pr` ref says open /
+  draft / merged / closed, its title and where review stands; checks and
+  mergeability (what `merger` tracks, `gh-ci-status` shows) are not pulled
+  yet. The review state is as fresh as the last poll (hourly; `jug sync
+  github` for now), so "re-review 5m" can read "re-review 1h" before the
+  next pull notices anything else. A team asked to review is named `a team`
+  (naming it needs the token's `read:org` scope). PRs are found by branch,
+  so a PR opened from a branch the workstream is not on must still be `jug
+  ref add`ed once (it is refreshed from then on).
 - **A sync creates a workstream for every ticket it selects** — with
   `assignee = "any"` that is the whole sprint, 46 directories for a
   46-ticket sprint. They are cheap (three files) and hidden by *mine only*,

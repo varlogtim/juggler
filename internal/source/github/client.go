@@ -1,6 +1,7 @@
 package github
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,12 +13,14 @@ import (
 	"time"
 )
 
-// Client is a minimal GitHub REST client (github.com or GitHub Enterprise
-// Server, which serves the same v3 API under /api/v3).
+// Client is a minimal GitHub client — REST v3 (github.com or GitHub
+// Enterprise Server, which serves the same API under /api/v3) plus the
+// GraphQL endpoint for the review facts.
 type Client struct {
-	Base  string // API base: https://api.github.com or https://ghes.example.com/api/v3
-	Token string
-	HTTP  *http.Client
+	Base    string // REST base: https://api.github.com or https://ghes.example.com/api/v3
+	GraphQL string // https://api.github.com/graphql or https://ghes.example.com/api/graphql
+	Token   string
+	HTTP    *http.Client
 }
 
 // Error is a non-2xx answer.
@@ -65,6 +68,37 @@ func (c *Client) get(ctx context.Context, path string, q url.Values, out any) er
 	}
 	if out == nil {
 		return nil
+	}
+	return json.Unmarshal(b, out)
+}
+
+// post sends a JSON body and decodes the JSON reply; non-2xx is an *Error.
+func (c *Client) post(ctx context.Context, u string, body []byte, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Content-Type", "application/json")
+	if c.Token != "" {
+		req.Header.Set("Authorization", "token "+c.Token)
+	}
+	hc := c.HTTP
+	if hc == nil {
+		hc = &http.Client{Timeout: 30 * time.Second}
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		msg := strings.TrimSpace(string(b))
+		if len(msg) > 300 {
+			msg = msg[:300] + "…"
+		}
+		return &Error{Status: resp.StatusCode, Path: u, Body: msg}
 	}
 	return json.Unmarshal(b, out)
 }

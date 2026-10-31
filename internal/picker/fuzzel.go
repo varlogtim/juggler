@@ -135,7 +135,10 @@ func prLabel(r *store.Ref) string {
 		key = "PR"
 	}
 	if r.Status != "" {
-		return key + " " + r.Status
+		key += " " + r.Status
+	}
+	if tag := r.ReviewTag(time.Now()); tag != "" {
+		key += " " + tag
 	}
 	return key
 }

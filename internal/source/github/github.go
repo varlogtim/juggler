@@ -7,7 +7,7 @@
 // Config (`[sources.<name>]`):
 //
 //	kind     = "github"
-//	base_url = "https://github.hpe.com"     # the web host; API: <base>/api/v3, or api.github.com for github.com
+//	base_url = "https://github.hpe.com"     # the web host; API: <base>/api/v3 (+ /api/graphql), or api.github.com
 //	token    = "file:~/secrets/github.token" # or "env:VAR", or the value
 //	repos    = []                            # owner/repo to look branches up in; default: every repo a
 //	                                         # workstream's checkout points at on this host
@@ -16,8 +16,10 @@
 // Per pull: for every workstream, the PRs for its branch in its repo (one
 // list request; skipped on the repo's default branch and for checkouts on
 // another host), then one request per `pr` ref on this host the lists did
-// not cover. Nothing is written by the connector; the sync applies the
-// snapshot's ref updates like `jug ref add` would.
+// not cover, then one GraphQL request per OPEN pull request for where it
+// stands with its reviewers (review.go). Nothing is written by the
+// connector; the sync applies the snapshot's ref updates like `jug ref
+// add` would.
 package github
 
 import (
@@ -45,7 +47,8 @@ func (connector) Kind() string { return "github" }
 type Config struct {
 	Kind    string   `toml:"kind"`
 	BaseURL string   `toml:"base_url"`
-	APIURL  string   `toml:"api_url"` // override when the API is not where base_url implies
+	APIURL  string   `toml:"api_url"`     // override when the REST API is not where base_url implies
+	GQLURL  string   `toml:"graphql_url"` // override when GraphQL is not where base_url implies
 	Token   string   `toml:"token"`
 	Repos   []string `toml:"repos"`
 	Poll    string   `toml:"poll"`
@@ -96,7 +99,7 @@ func (connector) Open(name string, decode func(any) error, env source.Env) (sour
 	if err != nil {
 		return nil, fmt.Errorf("source %s: token: %w", name, err)
 	}
-	api := cfg.APIURL
+	api, gql := cfg.APIURL, cfg.GQLURL
 	if api == "" {
 		if u.Host == "github.com" {
 			api = "https://api.github.com"
@@ -104,7 +107,14 @@ func (connector) Open(name string, decode func(any) error, env source.Env) (sour
 			api = u.Scheme + "://" + u.Host + "/api/v3"
 		}
 	}
-	return &Source{name: name, cfg: cfg, host: u.Host, poll: poll, client: &Client{Base: api, Token: token}}, nil
+	if gql == "" {
+		if u.Host == "github.com" {
+			gql = "https://api.github.com/graphql"
+		} else {
+			gql = u.Scheme + "://" + u.Host + "/api/graphql"
+		}
+	}
+	return &Source{name: name, cfg: cfg, host: u.Host, poll: poll, client: &Client{Base: api, GraphQL: gql, Token: token}}, nil
 }
 
 // Name, Kind, Poll and Describe implement source.Source.
@@ -116,7 +126,7 @@ func (s *Source) Describe() string {
 	if len(s.cfg.Repos) > 0 {
 		repos = "repos " + strings.Join(s.cfg.Repos, ", ")
 	}
-	return fmt.Sprintf("%s, %s; pr refs", s.host, repos)
+	return fmt.Sprintf("%s, %s; pr refs + review state", s.host, repos)
 }
 
 // prKey is owner/repo#N, as app.PRKey makes it from a PR URL.
@@ -137,8 +147,15 @@ func (s *Source) Pull(ctx context.Context, inv source.Inventory) (*source.Snapsh
 		watched[r] = true
 	}
 	covered := map[string]bool{} // "ws\x00key" already produced
-	var fromLists, fromKeys, branches int
+	var fromLists, fromKeys, branches, reviewed int
 	var skipped []string
+	type pending struct {
+		idx  int // into snap.Refs
+		repo string
+		pr   PR
+		prev *store.Ref // the workstream's current ref, when it has one
+	}
+	var open []pending
 	update := func(v source.WorkstreamView, repo string, pr PR) {
 		key := repo + "#" + strconv.Itoa(pr.Number)
 		if covered[v.Name+"\x00"+key] {
@@ -150,6 +167,9 @@ func (s *Source) Pull(ctx context.Context, inv source.Inventory) (*source.Snapsh
 			Ref:        store.Ref{Type: "pr", Key: key, URL: pr.HTMLURL, Title: pr.Title, Status: pr.Status()},
 			Closed:     pr.Closed(),
 		})
+		if pr.Status() == "open" {
+			open = append(open, pending{idx: len(snap.Refs) - 1, repo: repo, pr: pr, prev: v.Ref("pr", key)})
+		}
 	}
 
 	// 1. the PRs of each workstream's branch
@@ -200,13 +220,29 @@ func (s *Source) Pull(ctx context.Context, inv source.Inventory) (*source.Snapsh
 			fromKeys++
 		}
 	}
+	// 3. where each OPEN pull request stands with its reviewers. A failed
+	//    lookup keeps the state last recorded rather than blanking it.
+	for _, p := range open {
+		ref := &snap.Refs[p.idx].Ref
+		facts, err := s.client.ReviewFacts(ctx, p.repo, p.pr.Number)
+		if err != nil {
+			skipped = append(skipped, fmt.Sprintf("review state of %s: %v", ref.Key, err))
+			if p.prev != nil {
+				ref.Review, ref.ReviewAt, ref.ReviewBy = p.prev.Review, p.prev.ReviewAt, p.prev.ReviewBy
+			}
+			continue
+		}
+		st := Derive(facts)
+		ref.Review, ref.ReviewAt, ref.ReviewBy = st.State, st.At, st.By
+		reviewed++
+	}
 	sort.Slice(snap.Refs, func(i, j int) bool {
 		if snap.Refs[i].Workstream != snap.Refs[j].Workstream {
 			return snap.Refs[i].Workstream < snap.Refs[j].Workstream
 		}
 		return snap.Refs[i].Ref.Key < snap.Refs[j].Ref.Key
 	})
-	snap.Notes = append(snap.Notes, fmt.Sprintf("%s as %s: %d pull request(s) for %d branch(es), %d by ref", s.host, s.me.Login, fromLists, branches, fromKeys))
+	snap.Notes = append(snap.Notes, fmt.Sprintf("%s as %s: %d pull request(s) for %d branch(es), %d by ref, review state of %d open", s.host, s.me.Login, fromLists, branches, fromKeys, reviewed))
 	for _, sk := range skipped {
 		snap.Notes = append(snap.Notes, "skipped "+sk)
 	}

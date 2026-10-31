@@ -83,9 +83,32 @@ function reportSummary(r) {
   return (parts.length ? parts.join(', ') : 'nothing to do') + ` (${tail.join(', ')})`;
 }
 function stateGlyph(st) { return st === 'displayed' ? '●' : st === 'parked' ? '◐' : '○'; }
+// REVIEW mirrors store.ReviewStates: glyph + label per pull-request review
+// state, most pressing first. The two the user acts on — a re-review they
+// asked for, an approval waiting on merge — get their own colours.
+const REVIEW = {
+  're-review': ['↻', 're-review requested'],
+  'changes-requested': ['✗', 'changes requested'],
+  'approved': ['✔', 'approved — waiting on merge'],
+  'review-requested': ['◌', 'awaiting review'],
+  'pushed': ['↑', 'pushed since the last review'],
+  'commented': ['…', 'commented'],
+};
+// reviewChip renders a pr ref's review state ("" when none): the glyph and
+// state inline, who and since when on hover.
+function reviewChip(r) {
+  if (!r.review) return '';
+  const [glyph, label] = REVIEW[r.review] || ['', r.review];
+  // who it is about, in the state's own grammar
+  const prep = { 're-review': 'from', 'review-requested': 'from', 'approved': 'by', 'changes-requested': 'by', 'commented': 'by', 'pushed': 'after a review by' }[r.review] || '';
+  const title = label + (r.review_by ? ` ${prep} ${r.review_by}` : '') + (r.review_at ? ' · ' + ago(r.review_at) : '');
+  return h`<span class="review rv-${r.review}" title="${title}">${glyph} ${r.review}${r.review_at ? ' ' + shortAgo(r.review_at) : ''}</span>`;
+}
+// shortAgo is ago() without the word: 2h, 3d.
+function shortAgo(iso) { return ago(iso).replace(/ ago$/, '').replace('just now', 'now'); }
 function refBadge(r) {
   const label = r.key || (r.type === 'url' ? new URL(r.url).host : r.type);
-  return h`<a class="badge ref" href="${r.url}" target="_blank" rel="noopener" title="${r.title || r.url}">${r.type}:${label}${r.status ? raw(h`<span class="st">${r.status}</span>`) : ''}</a>`;
+  return h`<a class="badge ref" href="${r.url}" target="_blank" rel="noopener" title="${r.title || r.url}">${r.type}:${label}${r.status ? raw(h`<span class="st">${r.status}</span>`) : ''}${raw(reviewChip(r))}</a>`;
 }
 
 // ------------------------------------------------------------------ data loading
@@ -318,7 +341,7 @@ function renderDetail() {
     </fieldset>
 
     <fieldset><legend>refs</legend>
-      <ul class="reflist">${raw((d.refs || []).map(r => h`<li><span class="t">${r.type}</span><a class="k" href="${r.url}" target="_blank" rel="noopener">${r.key || r.url}</a><span class="ttl" title="${r.title}">${r.status ? '[' + r.status + '] ' : ''}${r.title || ''}</span>
+      <ul class="reflist">${raw((d.refs || []).map(r => h`<li><span class="t">${r.type}</span><a class="k" href="${r.url}" target="_blank" rel="noopener">${r.key || r.url}</a>${raw(reviewChip(r))}<span class="ttl" title="${r.title}">${r.status ? '[' + r.status + '] ' : ''}${r.title || ''}</span>
           <button class="sm" data-act="open-ref" data-what="${r.type}" title="open in the workstream's right stack">open</button>
           <button class="sm icon danger" data-act="ref-rm" data-type="${r.type}" data-key="${r.key || r.url}" title="remove">×</button></li>`).join(''))}
         ${(d.refs || []).length ? '' : raw('<li class="muted small">none</li>')}</ul>

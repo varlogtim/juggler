@@ -1249,7 +1249,11 @@ func (c *cli) ls(args []string) int {
 		for _, r := range in.Refs {
 			label := r.Key
 			if r.Status != "" {
-				label += " (" + r.Status + ")"
+				label += " (" + r.Status
+				if tag := r.ReviewTag(time.Now()); tag != "" {
+					label += " " + tag
+				}
+				label += ")"
 			}
 			switch {
 			case r.Type == "jira" && jira == "":
